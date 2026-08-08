@@ -1,0 +1,17 @@
+{
+  "cases": 8,
+  "max_absolute_error": {
+    "time_logits": 7.62939453125e-06,
+    "primary_logits": 1.71661376953125e-05,
+    "secondary_logits": 1.9073486328125e-05
+  },
+  "mean_absolute_error": {
+    "time_logits": 7.061753439785434e-07,
+    "primary_logits": 1.983313424602784e-06,
+    "secondary_logits": 2.472913735118709e-06
+  },
+  "passed": true,
+  "onnx_path": "E:\\Paper\\博士课题\\Deployment\\HospTrajFormer-Web\\app\\public\\model\\hosptrajformer_v7.onnx",
+  "onnx_size_bytes": 31330098,
+  "checkpoint_path": "E:\\Paper\\博士课题\\Outputs\\final_selected\\model\\factorial\\best_model_V7.pt"
+}

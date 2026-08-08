@@ -1,0 +1,66 @@
+{
+  "display_name": "HospTrajFormer",
+  "model_version": "V7",
+  "model_file": "hosptrajformer_v7.onnx",
+  "model_dimensions": {
+    "diagnosis_vocabulary": 5406,
+    "embedding": 256,
+    "max_history": 10,
+    "max_future": 3,
+    "max_secondary": 5
+  },
+  "normalization": {
+    "age_mean": 54.351627600004896,
+    "age_std": 22.838879925427847,
+    "dt_log_mean": 3.4212883195442747,
+    "dt_log_std": 2.5376422764742235
+  },
+  "special_tokens": {
+    "unknown": 0,
+    "padding": 1,
+    "time_padding": 8
+  },
+  "secondary_threshold": 0.2,
+  "time_buckets": [
+    {
+      "id": 0,
+      "label": "首次住院",
+      "median_days": 0.0
+    },
+    {
+      "id": 1,
+      "label": "1-7天",
+      "median_days": 4.0
+    },
+    {
+      "id": 2,
+      "label": "8-30天",
+      "median_days": 21.0
+    },
+    {
+      "id": 3,
+      "label": "31-90天",
+      "median_days": 51.0
+    },
+    {
+      "id": 4,
+      "label": "91-180天",
+      "median_days": 127.0
+    },
+    {
+      "id": 5,
+      "label": "181-365天",
+      "median_days": 259.0
+    },
+    {
+      "id": 6,
+      "label": "366-730天",
+      "median_days": 511.0
+    },
+    {
+      "id": 7,
+      "label": ">730天",
+      "median_days": 1110.0
+    }
+  ]
+}
