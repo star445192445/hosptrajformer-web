@@ -57,6 +57,14 @@ const NAMES: Record<string, string> = {
   'N19.X': '肾衰竭',
   'N17.9': '急性肾衰竭',
   'N05.9': '肾病综合征',
+  'J45.9': '哮喘',
+  'O70.0': '分娩时会阴裂伤',
+  'Z08.0': '肿瘤治疗后的随访检查',
+  'Z51.0': '放射治疗',
+  'I25.9': '慢性缺血性心脏病',
+  'S72.0': '股骨骨折',
+  'T14.9': '损伤',
+  'M17.9': '膝关节骨性关节炎',
 }
 
 export const CHAPTER_NAMES: Record<string, string> = {
@@ -85,6 +93,32 @@ export const CHAPTER_NAMES: Record<string, string> = {
   Z: '健康状态影响因素',
 }
 
+export const CHAPTER_COLORS: Record<string, string> = {
+  'A-B': '#8b5e34',
+  'C-D': '#7c3aed',
+  E: '#0f766e',
+  F: '#9333ea',
+  G: '#4338ca',
+  H: '#0e7490',
+  I: '#b45309',
+  J: '#2563eb',
+  K: '#15803d',
+  L: '#a16207',
+  M: '#9d174d',
+  N: '#0891b2',
+  O: '#db2777',
+  P: '#be123c',
+  Q: '#6d28d9',
+  R: '#64748b',
+  'S-T': '#dc2626',
+  U: '#475569',
+  V: '#57534e',
+  W: '#57534e',
+  X: '#57534e',
+  Y: '#57534e',
+  Z: '#4b5563',
+}
+
 export function diagnosisName(code: string): string {
   return NAMES[code] ?? ''
 }
@@ -92,4 +126,8 @@ export function diagnosisName(code: string): string {
 export function diagnosisLabel(code: string): string {
   const name = diagnosisName(code)
   return name ? `${code} ${name}` : code
+}
+
+export function chapterColor(chapter: string): string {
+  return CHAPTER_COLORS[chapter] ?? '#64748b'
 }

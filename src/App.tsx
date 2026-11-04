@@ -1,64 +1,109 @@
 import {
   Activity,
   AlertCircle,
-  ArrowRight,
-  BrainCircuit,
   Check,
-  ChevronRight,
-  CirclePlus,
-  Clock3,
-  Database,
   LoaderCircle,
-  LockKeyhole,
   Play,
   RotateCcw,
   ShieldCheck,
-  Trash2,
+  Sparkles,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
-import DiagnosisPicker from './DiagnosisPicker'
-import { CHAPTER_NAMES, diagnosisLabel } from './diagnosisNames'
-import { generateTrajectory, loadModel } from './inference'
-import type { Diagnosis, GeneratedStep, ModelConfig, ModelStatus, Visit } from './types'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import CasePicker from './CasePicker'
+import PathTable from './PathTable'
+import StepInspector from './StepInspector'
+import TechnicalPanel from './TechnicalPanel'
+import TimelineEditor from './TimelineEditor'
+import TrajectoryFan from './TrajectoryFan'
+import { CASES } from './cases'
+import { diagnosisLabel } from './diagnosisNames'
+import { loadModel, runGreedy, runMonteCarlo } from './inference'
+import type {
+  CaseDefinition,
+  DecodingMode,
+  Diagnosis,
+  ModelConfig,
+  ModelStatus,
+  MonteCarloResult,
+  PathSummary,
+  Trajectory,
+  Visit,
+} from './types'
 
-const uid = () => Math.random().toString(36).slice(2, 10)
+interface ValidationInfo {
+  cases: number
+  max_absolute_error: Record<string, number>
+  passed: boolean
+}
 
-const blankVisit = (age = 55, first = false): Visit => ({
-  uid: uid(),
-  age,
-  intervalBucket: first ? 0 : 4,
-  primary: null,
-  secondary: [],
-})
+type RunResult =
+  | { kind: 'greedy'; trajectory: Trajectory }
+  | { kind: 'sample'; mc: MonteCarloResult }
 
-function percentage(value: number): string {
-  return `${(value * 100).toFixed(value >= 0.1 ? 1 : 2)}%`
+function caseVisits(item: CaseDefinition, diagnosisByCode: Map<string, Diagnosis>): Visit[] {
+  return item.visits.map((visit) => ({
+    uid: Math.random().toString(36).slice(2, 10),
+    age: visit.age,
+    intervalDays: visit.intervalDays,
+    primary: diagnosisByCode.get(visit.primary) ?? null,
+    secondary: visit.secondary.flatMap((code) => {
+      const diagnosis = diagnosisByCode.get(code)
+      return diagnosis ? [diagnosis] : []
+    }),
+  }))
 }
 
 function App() {
   const [config, setConfig] = useState<ModelConfig | null>(null)
   const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([])
-  const [visits, setVisits] = useState<Visit[]>([blankVisit(55, true)])
-  const [gender, setGender] = useState(1)
+  const [validation, setValidation] = useState<ValidationInfo | null>(null)
   const [status, setStatus] = useState<ModelStatus>('loading')
-  const [progressText, setProgressText] = useState('正在读取模型配置')
-  const [results, setResults] = useState<GeneratedStep[]>([])
+  const [progressText, setProgressText] = useState('正在载入模型资源')
+  const [visits, setVisits] = useState<Visit[]>([])
+  const [gender, setGender] = useState(1)
+  const [activeCaseId, setActiveCaseId] = useState('')
+  const demoMode = new URLSearchParams(window.location.search).get('demo')
+  const [mode, setMode] = useState<DecodingMode>(demoMode === 'greedy' ? 'greedy' : 'sample')
+  const [samples, setSamples] = useState(Number(new URLSearchParams(window.location.search).get('samples')) || 20)
+  const [seed] = useState(20261104)
+  const [result, setResult] = useState<RunResult | null>(null)
+  const [selectedPathKey, setSelectedPathKey] = useState<string | null>(null)
   const [activeStep, setActiveStep] = useState(0)
+  const [latency, setLatency] = useState<number | null>(null)
+  const [mcProgress, setMcProgress] = useState(0)
   const [error, setError] = useState('')
+
+  const diagnosisByCode = useMemo(
+    () => new Map(diagnoses.map((diagnosis) => [diagnosis.code, diagnosis])),
+    [diagnoses],
+  )
+
+  const activeCase = CASES.find((item) => item.id === activeCaseId)
+  const autoRan = useRef(false)
+  const ready = status === 'ready'
+  const busy = status === 'running'
+  const canRun = ready && visits.length > 0 && visits.every((visit) => visit.primary)
 
   useEffect(() => {
     let cancelled = false
     Promise.all([
       fetch('/model/config.json').then((response) => response.json() as Promise<ModelConfig>),
       fetch('/model/diagnoses.json').then((response) => response.json() as Promise<Diagnosis[]>),
+      fetch('/model/validation.json').then((response) => response.json() as Promise<ValidationInfo>),
     ])
-      .then(async ([modelConfig, diagnosisList]) => {
+      .then(async ([modelConfig, diagnosisList, validationInfo]) => {
         if (cancelled) return
         setConfig(modelConfig)
         setDiagnoses(diagnosisList)
+        setValidation(validationInfo)
         setProgressText('正在载入浏览器推理模型')
         await loadModel(`/model/${modelConfig.model_file}`)
         if (cancelled) return
+        const map = new Map(diagnosisList.map((diagnosis) => [diagnosis.code, diagnosis]))
+        const initial = CASES[3]
+        setVisits(caseVisits(initial, map))
+        setGender(initial.gender)
+        setActiveCaseId(initial.id)
         setStatus('ready')
         setProgressText('模型已就绪')
       })
@@ -73,72 +118,70 @@ function App() {
     }
   }, [])
 
-  const activeResult = results[activeStep]
-  const canRun = status === 'ready' && visits.length > 0 && visits.every((visit) => visit.primary)
-
-  const diagnosisByCode = useMemo(
-    () => new Map(diagnoses.map((diagnosis) => [diagnosis.code, diagnosis])),
-    [diagnoses],
-  )
-
-  function updateVisit(index: number, update: Partial<Visit>) {
-    setVisits((current) => current.map((visit, visitIndex) => (visitIndex === index ? { ...visit, ...update } : visit)))
-    setResults([])
-  }
-
-  function addVisit() {
-    const previous = visits[visits.length - 1]
-    setVisits((current) => [...current, blankVisit(Math.min(105, previous.age + 0.5))])
-    setResults([])
-  }
-
-  function removeVisit(index: number) {
-    setVisits((current) => current.filter((_, visitIndex) => visitIndex !== index))
-    setResults([])
-  }
-
-  function reset() {
-    setVisits([blankVisit(55, true)])
-    setGender(1)
-    setResults([])
+  function loadCase(id: string) {
+    const item = CASES.find((entry) => entry.id === id)
+    if (!item) return
+    setVisits(caseVisits(item, diagnosisByCode))
+    setGender(item.gender)
+    setActiveCaseId(id)
+    setResult(null)
+    setSelectedPathKey(null)
     setActiveStep(0)
     setError('')
   }
 
-  function loadExample() {
-    const examples = [
-      { age: 52.2, intervalBucket: 0, primary: 'E11.9', secondary: ['I10.X', 'E78.5'] },
-      { age: 53.4, intervalBucket: 5, primary: 'I63.9', secondary: ['I10.X', 'E11.9'] },
-      { age: 54.1, intervalBucket: 4, primary: 'N18.9', secondary: ['E11.9', 'I10.X'] },
-    ]
-    setGender(1)
-    setVisits(
-      examples.map((item) => ({
-        uid: uid(),
-        age: item.age,
-        intervalBucket: item.intervalBucket,
-        primary: diagnosisByCode.get(item.primary) ?? null,
-        secondary: item.secondary.flatMap((code) => {
-          const diagnosis = diagnosisByCode.get(code)
-          return diagnosis ? [diagnosis] : []
-        }),
-      })),
-    )
-    setResults([])
+  function updateVisits(next: Visit[]) {
+    setVisits(next)
+    setActiveCaseId('')
+    setResult(null)
+    setSelectedPathKey(null)
     setError('')
   }
+
+  function reset() {
+    if (activeCase) loadCase(activeCase.id)
+    else {
+      setVisits([])
+      setResult(null)
+      setSelectedPathKey(null)
+    }
+  }
+
+  useEffect(() => {
+    if (!demoMode || autoRan.current) return
+    if (status !== 'ready' || !canRun) return
+    autoRan.current = true
+    void runModel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, visits, canRun, demoMode])
 
   async function runModel() {
     if (!config || !canRun) return
     setStatus('running')
-    setProgressText('正在生成三步未来轨迹')
     setError('')
+    setResult(null)
+    setSelectedPathKey(null)
+    setActiveStep(0)
+    setMcProgress(0)
+    const started = Date.now()
     try {
-      const generated = await generateTrajectory(visits, gender, config, diagnoses)
-      setResults(generated)
-      setActiveStep(0)
+      if (mode === 'greedy') {
+        setProgressText('正在生成逐步贪心轨迹')
+        const trajectory = await runGreedy(visits, gender, config, diagnoses)
+        setResult({ kind: 'greedy', trajectory })
+        setSelectedPathKey(trajectory.steps.map((step) => step.primary.code).join(' → '))
+      } else {
+        setProgressText('正在抽样候选轨迹')
+        const mc = await runMonteCarlo(visits, gender, config, diagnoses, samples, seed, (completed, total) => {
+          setMcProgress(completed / total)
+          setProgressText(`已抽样 ${completed}/${total} 条候选轨迹`)
+        })
+        setResult({ kind: 'sample', mc })
+        setSelectedPathKey(mc.paths[0]?.key ?? null)
+      }
+      setLatency(Date.now() - started)
       setStatus('ready')
-      setProgressText('模型已就绪')
+      setProgressText('生成完成')
     } catch (reason) {
       setStatus('error')
       setProgressText('生成失败')
@@ -146,289 +189,181 @@ function App() {
     }
   }
 
+  const trajectories: Trajectory[] =
+    result?.kind === 'greedy' ? [result.trajectory] : result?.kind === 'sample' ? result.mc.trajectories : []
+  const paths: PathSummary[] =
+    result?.kind === 'greedy'
+      ? [
+          {
+            key: result.trajectory.steps.map((step) => step.primary.code).join(' → '),
+            label: result.trajectory.steps.map((step) => step.primary.code).join(' → '),
+            count: 1,
+            share: 1,
+            steps: result.trajectory.steps,
+          },
+        ]
+      : result?.kind === 'sample'
+        ? result.mc.paths
+        : []
+  const sampleCount = result?.kind === 'sample' ? result.mc.samples : result?.kind === 'greedy' ? 1 : 0
+  const modeLabel = result?.kind === 'sample' ? `Monte Carlo · ${samples} 条` : '逐步贪心 · 1 条'
+  const selectedPath = paths.find((path) => path.key === selectedPathKey) ?? paths[0] ?? null
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark"><BrainCircuit size={23} /></div>
+          <span className="brand-mark">HTF</span>
           <div>
             <strong>HospTrajFormer</strong>
-            <span>住院疾病轨迹研究演示平台</span>
+            <span>多步住院轨迹生成 · 研究演示</span>
           </div>
         </div>
-        <div className="topbar-meta">
-          <span><LockKeyhole size={15} />本地推理</span>
-          <span><Database size={15} />V7 · 5,406词元</span>
+        <div className="topbar-right">
+          <span className="top-chip"><ShieldCheck size={14} /> 浏览器本地推理</span>
+          <span className="top-chip">V7 · {config?.model_dimensions.diagnosis_vocabulary.toLocaleString('zh-CN') ?? '5,406'} 词元</span>
           <span className={`status-pill ${status}`}>
-            {status === 'loading' || status === 'running' ? <LoaderCircle size={15} className="spin" /> : <span className="status-dot" />}
+            {status === 'loading' || status === 'running' ? <LoaderCircle size={14} className="spin" /> : <i />}
             {progressText}
           </span>
         </div>
       </header>
 
       <main className="workspace">
-        <section className="input-column" aria-label="住院历史输入">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">PATIENT HISTORY</span>
-              <h1>观察到的住院历史</h1>
+        <aside className="left-rail">
+          <section className="case-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">SYNTHETIC CASES</span>
+                <h2>选择演示病例</h2>
+              </div>
+              <button type="button" className="icon-quiet" title="重置病例" aria-label="重置病例" onClick={reset}>
+                <RotateCcw size={16} />
+              </button>
             </div>
-            <div className="heading-actions">
-              <button type="button" className="text-button" onClick={loadExample}>加载示例</button>
-              <button type="button" className="icon-button" title="重置" aria-label="重置" onClick={reset}><RotateCcw size={17} /></button>
+            <CasePicker cases={CASES} activeId={activeCaseId} onSelect={loadCase} />
+            <p className="case-note">
+              {activeCase ? activeCase.note : '当前为自定义轨迹；所有病例均为合成示例，不含真实患者信息。'}
+            </p>
+          </section>
+
+          <TimelineEditor
+            visits={visits}
+            gender={gender}
+            diagnoses={diagnoses}
+            onGenderChange={setGender}
+            onChange={updateVisits}
+          />
+
+          <section className="run-panel">
+            <div className="mode-switch" role="group" aria-label="解码模式">
+              <button type="button" className={mode === 'sample' ? 'active' : ''} onClick={() => setMode('sample')}>
+                概率抽样
+              </button>
+              <button type="button" className={mode === 'greedy' ? 'active' : ''} onClick={() => setMode('greedy')}>
+                逐步贪心
+              </button>
             </div>
-          </div>
-
-          <div className="patient-context">
-            <label>性别</label>
-            <div className="segmented" aria-label="性别">
-              {[
-                [1, '男'],
-                [2, '女'],
-                [0, '未知'],
-              ].map(([value, label]) => (
-                <button
-                  type="button"
-                  key={value}
-                  className={gender === value ? 'active' : ''}
-                  onClick={() => setGender(Number(value))}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <span className="context-note">最多纳入最近10次住院</span>
-          </div>
-
-          <div className="visit-list">
-            {visits.map((visit, index) => (
-              <article className="visit-card" key={visit.uid}>
-                <div className="visit-index">
-                  <span>{index + 1}</span>
-                  <div className="visit-line" />
-                </div>
-                <div className="visit-body">
-                  <div className="visit-title">
-                    <strong>第{index + 1}次住院</strong>
-                    {visits.length > 1 && (
-                      <button
-                        type="button"
-                        className="icon-button quiet danger"
-                        title="删除本次住院"
-                        aria-label="删除本次住院"
-                        onClick={() => removeVisit(index)}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </div>
-                  <div className="visit-grid">
-                    <label className="field">
-                      <span>住院时年龄</span>
-                      <div className="number-input">
-                        <input
-                          type="number"
-                          min="0"
-                          max="105"
-                          step="0.1"
-                          value={visit.age}
-                          onChange={(event) => updateVisit(index, { age: Number(event.target.value) })}
-                        />
-                        <em>岁</em>
-                      </div>
-                    </label>
-                    <label className="field">
-                      <span>距前次住院</span>
-                      <select
-                        value={visit.intervalBucket}
-                        disabled={index === 0}
-                        onChange={(event) => updateVisit(index, { intervalBucket: Number(event.target.value) })}
-                      >
-                        {config?.time_buckets.map((bucket) => (
-                          <option key={bucket.id} value={bucket.id} disabled={index > 0 && bucket.id === 0}>
-                            {index === 0 && bucket.id === 0 ? '首次记录' : bucket.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="field full">
-                      <span>主要诊断</span>
-                      <DiagnosisPicker
-                        diagnoses={diagnoses}
-                        value={visit.primary}
-                        onChange={(primary) => updateVisit(index, { primary })}
-                      />
-                    </div>
-                    <div className="field full">
-                      <span>次要诊断 <small>{visit.secondary.length}/5</small></span>
-                      {visit.secondary.length > 0 && (
-                        <div className="secondary-chips">
-                          {visit.secondary.map((diagnosis) => (
-                            <button
-                              type="button"
-                              key={diagnosis.id}
-                              title="移除次要诊断"
-                              onClick={() => updateVisit(index, {
-                                secondary: visit.secondary.filter((item) => item.id !== diagnosis.id),
-                              })}
-                            >
-                              {diagnosisLabel(diagnosis.code)} <span>×</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      {visit.secondary.length < 5 && (
-                        <DiagnosisPicker
-                          diagnoses={diagnoses}
-                          value={null}
-                          excludedIds={[
-                            ...(visit.primary ? [visit.primary.id] : []),
-                            ...visit.secondary.map((item) => item.id),
-                          ]}
-                          placeholder="添加次要诊断"
-                          onChange={(diagnosis) => {
-                            if (diagnosis) updateVisit(index, { secondary: [...visit.secondary, diagnosis] })
-                          }}
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          <div className="input-actions">
-            <button type="button" className="secondary-button" disabled={visits.length >= 10} onClick={addVisit}>
-              <CirclePlus size={18} />添加住院事件
+            {mode === 'sample' && (
+              <label className="sample-control">
+                <span>候选轨迹数</span>
+                <select value={samples} onChange={(event) => setSamples(Number(event.target.value))}>
+                  {[10, 20, 30, 50].map((value) => (
+                    <option key={value} value={value}>{value} 条</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button type="button" className="primary-button" disabled={!canRun || busy} onClick={runModel}>
+              {status === 'running' ? <LoaderCircle size={17} className="spin" /> : <Play size={17} fill="currentColor" />}
+              {mode === 'sample' ? '生成候选轨迹' : '生成确定性轨迹'}
             </button>
-            <button type="button" className="primary-button" disabled={!canRun} onClick={runModel}>
-              {status === 'running' ? <LoaderCircle size={18} className="spin" /> : <Play size={18} fill="currentColor" />}
-              生成未来轨迹
-            </button>
-          </div>
-          {error && <div className="error-banner"><AlertCircle size={18} />{error}</div>}
-        </section>
+            {status === 'running' && mode === 'sample' && (
+              <div className="progress-track"><i style={{ width: `${mcProgress * 100}%` }} /></div>
+            )}
+            {error && <div className="error-banner"><AlertCircle size={16} />{error}</div>}
+          </section>
+        </aside>
 
-        <section className="result-column" aria-label="模型输出">
-          <div className="section-heading result-heading">
-            <div>
-              <span className="eyebrow">MODEL OUTPUT</span>
-              <h2>未来住院轨迹</h2>
-            </div>
-            {results.length > 0 && <span className="result-badge"><Check size={15} />已生成</span>}
-          </div>
-
-          {!results.length ? (
-            <div className="empty-result">
-              <div className="empty-icon"><Activity size={30} /></div>
-              <strong>等待生成</strong>
-              <span>模型输出将在此处呈现</span>
-              <div className="privacy-strip"><ShieldCheck size={16} />输入仅在当前浏览器中处理</div>
+        <section className="result-column" aria-live="polite">
+          {!result ? (
+            <div className="empty-state">
+              <span className="empty-icon"><Sparkles size={28} /></span>
+              <h2>从历史轨迹生成未来三步候选</h2>
+              <p>
+                左侧选择合成病例，或直接编辑年龄、住院间隔与诊断；模型将输出未来三次住院的时间间隔、
+                主要诊断与次要诊断候选。概率抽样会生成多条候选轨迹，逐步贪心只给出一条确定性路径。
+              </p>
+              <div className="empty-points">
+                <span><Check size={14} /> 浏览器内运行</span>
+                <span><Check size={14} /> 不保存输入</span>
+                <span><Check size={14} /> 结果非临床建议</span>
+              </div>
+              <div className="empty-diagram">
+                <span>历史住院</span><i /><span>三步候选</span><i /><span>概率与频次</span>
+              </div>
             </div>
           ) : (
-            <>
-              <div className="trajectory-strip">
-                {results.map((result, index) => (
-                  <div className="trajectory-segment" key={result.step}>
-                    <button
-                      type="button"
-                      className={activeStep === index ? 'active' : ''}
-                      onClick={() => setActiveStep(index)}
-                    >
-                      <span>未来第{result.step}步</span>
-                      <strong>{result.primary.code}</strong>
-                      <small>{result.interval.label}</small>
-                    </button>
-                    {index < results.length - 1 && <ChevronRight size={19} />}
-                  </div>
-                ))}
+            <div className="result-stack">
+              <div className="result-summary">
+                <div>
+                  <span className="eyebrow">GENERATION SUMMARY</span>
+                  <h2>未来三步候选轨迹</h2>
+                </div>
+                <div className="summary-stats">
+                  <span><strong>{sampleCount}</strong> 条轨迹</span>
+                  <span><strong>{paths.length}</strong> 条不同诊断序列</span>
+                  <span><strong>{latency === null ? '—' : latency < 100 ? '<0.1' : (latency / 1000).toFixed(2)}</strong> s</span>
+                  <span className="summary-mode">{modeLabel}</span>
+                </div>
               </div>
 
-              {activeResult && (
-                <div className="result-details">
-                  <div className="result-summary">
-                    <div className="summary-icon"><Clock3 size={21} /></div>
-                    <div>
-                      <span>预计住院间隔</span>
-                      <strong>{activeResult.interval.label}</strong>
-                      <small>代表性间隔 {activeResult.interval.median_days.toLocaleString('zh-CN')} 天</small>
-                    </div>
-                    <ArrowRight size={20} />
-                    <div>
-                      <span>主要诊断候选</span>
-                      <strong>{diagnosisLabel(activeResult.primary.code)}</strong>
-                      <small>Top1概率 {percentage(activeResult.primaryProbability)}</small>
-                    </div>
+              <TrajectoryFan paths={paths} selectedKey={selectedPathKey} onSelect={setSelectedPathKey} />
+
+              <PathTable
+                paths={paths}
+                selectedKey={selectedPathKey}
+                samples={sampleCount}
+                onSelect={setSelectedPathKey}
+              />
+
+              <StepInspector
+                trajectories={trajectories}
+                buckets={config?.time_buckets ?? []}
+                activeStep={activeStep}
+                onStepChange={setActiveStep}
+              />
+
+              {selectedPath && (
+                <section className="selected-path">
+                  <span className="eyebrow">SELECTED PATH</span>
+                  <div className="selected-content">
+                    <strong>{selectedPath.steps.map((step) => step.primary.code).join(' → ')}</strong>
+                    <span>
+                      {selectedPath.steps
+                        .map((step) => `${diagnosisLabel(step.primary.code)}（${step.interval.label}）`)
+                        .join('；')}
+                    </span>
+                    <em>{selectedPath.count} 条 · {(selectedPath.share * 100).toFixed(1)}%</em>
                   </div>
-
-                  <section className="metric-section">
-                    <div className="metric-heading">
-                      <h3>时间间隔概率</h3>
-                      <span>7个有效时间桶</span>
-                    </div>
-                    <div className="time-bars">
-                      {activeResult.intervalProbabilities.map(({ id, probability }) => {
-                        const bucket = config?.time_buckets.find((item) => item.id === id)
-                        return (
-                          <div className={id === activeResult.interval.id ? 'selected' : ''} key={id}>
-                            <span>{bucket?.label}</span>
-                            <div><i style={{ width: `${Math.max(1.5, probability * 100)}%` }} /></div>
-                            <strong>{percentage(probability)}</strong>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </section>
-
-                  <section className="metric-section">
-                    <div className="metric-heading">
-                      <h3>主要诊断 Top5</h3>
-                      <span>概率由高至低</span>
-                    </div>
-                    <div className="diagnosis-ranking">
-                      {activeResult.primaryTop5.map(({ diagnosis, probability }, index) => (
-                        <div key={diagnosis.id}>
-                          <span className="rank">{index + 1}</span>
-                          <div className="rank-label">
-                            <strong>{diagnosisLabel(diagnosis.code)}</strong>
-                            <small>{CHAPTER_NAMES[diagnosis.chapter] ?? diagnosis.chapter}</small>
-                          </div>
-                          <div className="rank-bar"><i style={{ width: `${Math.max(2, probability * 100)}%` }} /></div>
-                          <em>{percentage(probability)}</em>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="metric-section secondary-output">
-                    <div className="metric-heading">
-                      <h3>次要诊断候选</h3>
-                      <span>阈值0.20，最多5项</span>
-                    </div>
-                    {activeResult.secondary.length ? (
-                      <div className="secondary-output-list">
-                        {activeResult.secondary.map(({ diagnosis, probability }) => (
-                          <div key={diagnosis.id}>
-                            <span>{diagnosisLabel(diagnosis.code)}</span>
-                            <strong>{percentage(probability)}</strong>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="no-secondary">无诊断达到预设阈值</p>
-                    )}
-                  </section>
-                </div>
+                </section>
               )}
-            </>
+
+              <TechnicalPanel
+                config={config}
+                validation={validation}
+                latencyMs={latency}
+                modeLabel={modeLabel}
+                modelBytes={31330098}
+              />
+            </div>
           )}
         </section>
       </main>
 
       <footer>
-        <span>HospTrajFormer · 浏览器端研究演示</span>
-        <p>仅供科研与教学演示，不用于临床诊断、治疗决策或个体预后判断。</p>
+        <span>HospTrajFormer · 研究演示</span>
+        <p>仅供科研与教学；不用于临床诊断、治疗决策或个体预后判断。合成病例不含真实患者信息。</p>
       </footer>
     </div>
   )

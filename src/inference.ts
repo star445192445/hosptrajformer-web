@@ -1,5 +1,19 @@
 import * as ort from 'onnxruntime-web'
-import type { Diagnosis, GeneratedStep, ModelConfig, Visit } from './types'
+import type {
+  Diagnosis,
+  GeneratedStep,
+  ModelConfig,
+  MonteCarloResult,
+  PathSummary,
+  PrimaryCandidate,
+  SecondaryCandidate,
+  TimeBucket,
+  Trajectory,
+  Visit,
+} from './types'
+
+const DAYS_PER_YEAR = 365.2425
+const BUCKET_UPPER_BOUNDS = [7, 30, 90, 180, 365, 730]
 
 let sessionPromise: Promise<ort.InferenceSession> | null = null
 
@@ -28,13 +42,22 @@ function sigmoid(value: number): number {
   return exp / (1 + exp)
 }
 
-function topIndices(values: number[], count: number, minimumId = 0): number[] {
-  return values
-    .map((value, index) => ({ value, index }))
-    .filter(({ index }) => index >= minimumId)
-    .sort((left, right) => right.value - left.value)
-    .slice(0, count)
-    .map(({ index }) => index)
+function tensorSlice(data: ort.Tensor['data'], offset: number, length: number): number[] {
+  const output: number[] = []
+  for (let index = offset; index < offset + length; index += 1) output.push(Number(data[index]))
+  return output
+}
+
+export function bucketIdForDays(days: number): number {
+  const value = Math.max(0, days)
+  for (let index = 0; index < BUCKET_UPPER_BOUNDS.length; index += 1) {
+    if (value <= BUCKET_UPPER_BOUNDS[index]) return index + 1
+  }
+  return 7
+}
+
+function bucketById(config: ModelConfig, id: number): TimeBucket {
+  return config.time_buckets.find((bucket) => bucket.id === id) ?? config.time_buckets[0]
 }
 
 function ageZ(age: number, config: ModelConfig): number {
@@ -42,13 +65,7 @@ function ageZ(age: number, config: ModelConfig): number {
 }
 
 function intervalZ(days: number, config: ModelConfig): number {
-  return (Math.log1p(days) - config.normalization.dt_log_mean) / config.normalization.dt_log_std
-}
-
-function tensorSlice(data: ort.Tensor['data'], offset: number, length: number): number[] {
-  const output: number[] = []
-  for (let index = offset; index < offset + length; index += 1) output.push(Number(data[index]))
-  return output
+  return (Math.log1p(Math.max(days, 0)) - config.normalization.dt_log_mean) / config.normalization.dt_log_std
 }
 
 async function createSession(modelUrl: string): Promise<ort.InferenceSession> {
@@ -65,17 +82,46 @@ export function loadModel(modelUrl: string): Promise<ort.InferenceSession> {
   return sessionPromise
 }
 
-interface FutureState {
-  dt: number[]
-  dtCont: number[]
-  primary: number[]
-  secondary: number[]
-  secondaryMask: boolean[]
-  ages: number[]
-  visitMask: boolean[]
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let value = state
+    value = Math.imul(value ^ (value >>> 15), value | 1)
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296
+  }
 }
 
-function buildFeeds(visits: Visit[], gender: number, config: ModelConfig, future: FutureState) {
+function categorical(random: () => number, probabilities: number[]): number {
+  const total = probabilities.reduce((sum, value) => sum + value, 0)
+  if (total <= 0) return 0
+  let threshold = random() * total
+  for (let index = 0; index < probabilities.length; index += 1) {
+    threshold -= probabilities[index]
+    if (threshold <= 0) return index
+  }
+  return probabilities.length - 1
+}
+
+function entropy(probabilities: number[]): number {
+  return probabilities.reduce((sum, value) => (value > 0 ? sum - value * Math.log(value) : sum), 0)
+}
+
+interface FutureEvent {
+  intervalBucket: number
+  intervalDays: number
+  primary: Diagnosis
+  secondary: SecondaryCandidate[]
+  age: number
+}
+
+function buildFeeds(
+  visits: Visit[],
+  gender: number,
+  config: ModelConfig,
+  prefix: FutureEvent[],
+) {
   const maxHistory = config.model_dimensions.max_history
   const maxFuture = config.model_dimensions.max_future
   const maxSecondary = config.model_dimensions.max_secondary
@@ -90,9 +136,10 @@ function buildFeeds(visits: Visit[], gender: number, config: ModelConfig, future
   const histVisitMask = Array(maxHistory).fill(false)
 
   history.forEach((visit, visitIndex) => {
-    const bucket = config.time_buckets.find((item) => item.id === visit.intervalBucket) ?? config.time_buckets[0]
-    histDt[visitIndex] = visit.intervalBucket
-    histDtCont[visitIndex] = intervalZ(bucket.median_days, config)
+    const days = visitIndex === 0 ? 0 : Math.max(1, visit.intervalDays)
+    const bucketId = visitIndex === 0 ? 0 : bucketIdForDays(days)
+    histDt[visitIndex] = bucketId
+    histDtCont[visitIndex] = visitIndex === 0 ? 0 : intervalZ(days, config)
     histPrimary[visitIndex] = visit.primary?.id ?? config.special_tokens.unknown
     histAge[visitIndex] = ageZ(visit.age, config)
     histVisitMask[visitIndex] = true
@@ -100,6 +147,30 @@ function buildFeeds(visits: Visit[], gender: number, config: ModelConfig, future
       const position = visitIndex * maxSecondary + secondaryIndex
       histSecondary[position] = diagnosis.id
       histSecondaryMask[position] = true
+    })
+  })
+
+  const futDt = Array(maxFuture).fill(0)
+  const futDtCont = Array(maxFuture).fill(0)
+  const futPrimary = Array(maxFuture).fill(config.special_tokens.padding)
+  const futSecondary = Array(maxFuture * maxSecondary).fill(config.special_tokens.padding)
+  const futSecondaryMask = Array(maxFuture * maxSecondary).fill(false)
+  const futAge = Array(maxFuture).fill(0)
+  const futVisitMask = Array(maxFuture).fill(false)
+
+  // Match the offline decoder: the current (dummy) target position is marked valid.
+  if (prefix.length < maxFuture) futVisitMask[prefix.length] = true
+
+  prefix.forEach((event, index) => {
+    futDt[index] = event.intervalBucket
+    futDtCont[index] = intervalZ(event.intervalDays, config)
+    futPrimary[index] = event.primary.id
+    futAge[index] = ageZ(event.age, config)
+    futVisitMask[index] = true
+    event.secondary.slice(0, maxSecondary).forEach((candidate, secondaryIndex) => {
+      const position = index * maxSecondary + secondaryIndex
+      futSecondary[position] = candidate.diagnosis.id
+      futSecondaryMask[position] = true
     })
   })
 
@@ -113,102 +184,276 @@ function buildFeeds(visits: Visit[], gender: number, config: ModelConfig, future
     hist_secondary_mask: boolTensor(histSecondaryMask, [1, maxHistory, maxSecondary]),
     hist_age_z: float32(histAge, [1, maxHistory]),
     hist_visit_mask: boolTensor(histVisitMask, [1, maxHistory]),
-    fut_dt: int64(future.dt, [1, maxFuture]),
-    fut_dt_cont: float32(future.dtCont, [1, maxFuture]),
-    fut_primary: int64(future.primary, [1, maxFuture]),
-    fut_secondary: int64(future.secondary, [1, maxFuture, maxSecondary]),
-    fut_secondary_mask: boolTensor(future.secondaryMask, [1, maxFuture, maxSecondary]),
-    fut_age_z: float32(future.ages, [1, maxFuture]),
-    fut_visit_mask: boolTensor(future.visitMask, [1, maxFuture]),
+    fut_dt: int64(futDt, [1, maxFuture]),
+    fut_dt_cont: float32(futDtCont, [1, maxFuture]),
+    fut_primary: int64(futPrimary, [1, maxFuture]),
+    fut_secondary: int64(futSecondary, [1, maxFuture, maxSecondary]),
+    fut_secondary_mask: boolTensor(futSecondaryMask, [1, maxFuture, maxSecondary]),
+    fut_age_z: float32(futAge, [1, maxFuture]),
+    fut_visit_mask: boolTensor(futVisitMask, [1, maxFuture]),
   }
 }
 
-export async function generateTrajectory(
+interface StepDistribution {
+  intervalProbabilities: number[]
+  primaryProbabilities: number[]
+  secondaryProbabilities: number[]
+}
+
+async function stepDistribution(
+  session: ort.InferenceSession,
+  visits: Visit[],
+  gender: number,
+  config: ModelConfig,
+  prefix: FutureEvent[],
+  step: number,
+): Promise<StepDistribution> {
+  const output = await session.run(buildFeeds(visits, gender, config, prefix))
+  const vocabularySize = config.model_dimensions.diagnosis_vocabulary
+  const timeLogits = tensorSlice(output.time_logits.data, step * 8, 8)
+  timeLogits[0] = Number.NEGATIVE_INFINITY
+  const primaryLogits = tensorSlice(output.primary_logits.data, step * vocabularySize, vocabularySize)
+  primaryLogits[0] = Number.NEGATIVE_INFINITY
+  primaryLogits[1] = Number.NEGATIVE_INFINITY
+  const secondaryLogits = tensorSlice(output.secondary_logits.data, step * vocabularySize, vocabularySize)
+  return {
+    intervalProbabilities: softmax(timeLogits),
+    primaryProbabilities: softmax(primaryLogits),
+    secondaryProbabilities: secondaryLogits.map((value) => sigmoid(value)),
+  }
+}
+
+function topPrimary(
+  probabilities: number[],
+  diagnoses: Diagnosis[],
+  count = 5,
+): PrimaryCandidate[] {
+  const diagnosisById = new Map(diagnoses.map((diagnosis) => [diagnosis.id, diagnosis]))
+  return probabilities
+    .map((probability, id) => ({ probability, id }))
+    .filter(({ id }) => id >= 2)
+    .sort((left, right) => right.probability - left.probability)
+    .slice(0, count)
+    .flatMap(({ id, probability }) => {
+      const diagnosis = diagnosisById.get(id)
+      return diagnosis ? [{ diagnosis, probability }] : []
+    })
+}
+
+function secondaryFromThreshold(
+  probabilities: number[],
+  diagnoses: Diagnosis[],
+  threshold: number,
+  maximum: number,
+): SecondaryCandidate[] {
+  const diagnosisById = new Map(diagnoses.map((diagnosis) => [diagnosis.id, diagnosis]))
+  return probabilities
+    .map((probability, id) => ({ probability, id }))
+    .filter(({ id, probability }) => id >= 2 && probability >= threshold)
+    .sort((left, right) => right.probability - left.probability)
+    .slice(0, maximum)
+    .flatMap(({ id, probability }) => {
+      const diagnosis = diagnosisById.get(id)
+      return diagnosis ? [{ diagnosis, probability }] : []
+    })
+}
+
+function makeStep(
+  step: number,
+  age: number,
+  bucket: TimeBucket,
+  intervalProbabilities: number[],
+  primary: Diagnosis,
+  primaryProbability: number,
+  primaryTop5: PrimaryCandidate[],
+  secondary: SecondaryCandidate[],
+  entropyValue: number,
+): GeneratedStep {
+  return {
+    step,
+    age,
+    intervalDays: bucket.median_days,
+    interval: bucket,
+    intervalProbabilities: intervalProbabilities
+      .map((probability, id) => ({ id, probability }))
+      .filter(({ id }) => id >= 1),
+    primary,
+    primaryProbability,
+    primaryTop5,
+    secondary,
+    entropy: entropyValue,
+  }
+}
+
+export async function runGreedy(
   visits: Visit[],
   gender: number,
   config: ModelConfig,
   diagnoses: Diagnosis[],
-): Promise<GeneratedStep[]> {
+): Promise<Trajectory> {
   if (!visits.length || !visits.every((visit) => visit.primary)) {
     throw new Error('请完整填写每次住院的主要诊断。')
   }
-
   const session = await loadModel(`/model/${config.model_file}`)
-  const diagnosisById = new Map(diagnoses.map((diagnosis) => [diagnosis.id, diagnosis]))
-  const futureLength = config.model_dimensions.max_future
-  const secondaryLength = config.model_dimensions.max_secondary
-  const future: FutureState = {
-    dt: Array(futureLength).fill(0),
-    dtCont: Array(futureLength).fill(0),
-    primary: Array(futureLength).fill(config.special_tokens.padding),
-    secondary: Array(futureLength * secondaryLength).fill(config.special_tokens.padding),
-    secondaryMask: Array(futureLength * secondaryLength).fill(false),
-    ages: Array(futureLength).fill(0),
-    visitMask: Array(futureLength).fill(false),
-  }
-
-  const results: GeneratedStep[] = []
+  const prefix: FutureEvent[] = []
+  const steps: GeneratedStep[] = []
   let currentAge = visits[visits.length - 1].age
 
-  for (let step = 0; step < futureLength; step += 1) {
-    const output = await session.run(buildFeeds(visits, gender, config, future))
-    const timeLogits = tensorSlice(output.time_logits.data, step * 8, 8)
-    timeLogits[0] = Number.NEGATIVE_INFINITY
-    const timeProbabilities = softmax(timeLogits)
-    const intervalId = topIndices(timeProbabilities, 1, 1)[0]
-    const interval = config.time_buckets.find((item) => item.id === intervalId)!
-
-    const vocabularySize = config.model_dimensions.diagnosis_vocabulary
-    const primaryLogits = tensorSlice(output.primary_logits.data, step * vocabularySize, vocabularySize)
-    primaryLogits[0] = Number.NEGATIVE_INFINITY
-    primaryLogits[1] = Number.NEGATIVE_INFINITY
-    const primaryProbabilities = softmax(primaryLogits)
-    const primaryIds = topIndices(primaryProbabilities, 5, 2)
-    const primary = diagnosisById.get(primaryIds[0])
-    if (!primary) throw new Error('模型返回了无法识别的主要诊断。')
-
-    const secondaryLogits = tensorSlice(output.secondary_logits.data, step * vocabularySize, vocabularySize)
-    const secondaryCandidates = secondaryLogits
-      .map((value, id) => ({ id, probability: sigmoid(value) }))
-      .filter(({ id, probability }) => id >= 2 && probability >= config.secondary_threshold)
-      .sort((left, right) => right.probability - left.probability)
-      .slice(0, secondaryLength)
-      .flatMap(({ id, probability }) => {
-        const diagnosis = diagnosisById.get(id)
-        return diagnosis ? [{ diagnosis, probability }] : []
-      })
-
-    currentAge += interval.median_days / 365.2425
-    const primaryTop5 = primaryIds.flatMap((id) => {
-      const diagnosis = diagnosisById.get(id)
-      return diagnosis ? [{ diagnosis, probability: primaryProbabilities[id] }] : []
-    })
-
-    results.push({
-      step: step + 1,
-      age: currentAge,
-      interval,
-      intervalProbabilities: timeProbabilities.slice(1).map((probability, index) => ({
-        id: index + 1,
-        probability,
-      })),
+  for (let step = 0; step < config.model_dimensions.max_future; step += 1) {
+    const distribution = await stepDistribution(session, visits, gender, config, prefix, step)
+    const bucketId = distribution.intervalProbabilities
+      .map((probability, id) => ({ probability, id }))
+      .filter(({ id }) => id >= 1)
+      .sort((left, right) => right.probability - left.probability)[0].id
+    const bucket = bucketById(config, bucketId)
+    const primaryCandidates = topPrimary(distribution.primaryProbabilities, diagnoses)
+    if (!primaryCandidates.length) throw new Error('模型未返回可识别的主要诊断。')
+    const primary = primaryCandidates[0].diagnosis
+    const secondary = secondaryFromThreshold(
+      distribution.secondaryProbabilities,
+      diagnoses,
+      config.secondary_threshold,
+      config.model_dimensions.max_secondary,
+    )
+    const primaryDistribution = distribution.primaryProbabilities.filter((_, id) => id >= 2)
+    currentAge += bucket.median_days / DAYS_PER_YEAR
+    steps.push(
+      makeStep(
+        step + 1,
+        currentAge,
+        bucket,
+        distribution.intervalProbabilities,
+        primary,
+        primaryCandidates[0].probability,
+        primaryCandidates,
+        secondary,
+        entropy(primaryDistribution),
+      ),
+    )
+    prefix.push({
+      intervalBucket: bucketId,
+      intervalDays: bucket.median_days,
       primary,
-      primaryProbability: primaryProbabilities[primary.id],
-      primaryTop5,
-      secondary: secondaryCandidates,
-    })
-
-    future.dt[step] = interval.id
-    future.dtCont[step] = intervalZ(interval.median_days, config)
-    future.primary[step] = primary.id
-    future.ages[step] = ageZ(currentAge, config)
-    future.visitMask[step] = true
-    secondaryCandidates.forEach(({ diagnosis }, secondaryIndex) => {
-      const position = step * secondaryLength + secondaryIndex
-      future.secondary[position] = diagnosis.id
-      future.secondaryMask[position] = true
+      secondary,
+      age: currentAge,
     })
   }
+  return { id: 0, steps }
+}
 
-  return results
+function sampleStep(
+  distribution: StepDistribution,
+  ages: number,
+  config: ModelConfig,
+  diagnoses: Diagnosis[],
+  random: () => number,
+  step: number,
+): { step: GeneratedStep; event: FutureEvent } {
+  const intervalIds = distribution.intervalProbabilities
+    .map((probability, id) => ({ probability, id }))
+    .filter(({ id }) => id >= 1)
+  const bucketId = intervalIds[categorical(random, intervalIds.map(({ probability }) => probability))].id
+  const bucket = bucketById(config, bucketId)
+  const primaryIds = distribution.primaryProbabilities
+    .map((probability, id) => ({ probability, id }))
+    .filter(({ id }) => id >= 2)
+  const primaryId = primaryIds[categorical(random, primaryIds.map(({ probability }) => probability))].id
+  const diagnosisById = new Map(diagnoses.map((diagnosis) => [diagnosis.id, diagnosis]))
+  const primary = diagnosisById.get(primaryId)
+  if (!primary) throw new Error('抽样得到无法识别的主要诊断。')
+  const secondary = distribution.secondaryProbabilities
+    .map((probability, id) => ({ probability, id }))
+    .filter(({ id, probability }) => id >= 2 && random() < probability)
+    .sort((left, right) => right.probability - left.probability)
+    .slice(0, config.model_dimensions.max_secondary)
+    .flatMap(({ id, probability }) => {
+      const diagnosis = diagnosisById.get(id)
+      return diagnosis ? [{ diagnosis, probability }] : []
+    })
+  const primaryTop5 = topPrimary(distribution.primaryProbabilities, diagnoses)
+  const primaryDistribution = distribution.primaryProbabilities.filter((_, id) => id >= 2)
+  const age = ages + bucket.median_days / DAYS_PER_YEAR
+  const stepResult = makeStep(
+    step + 1,
+    age,
+    bucket,
+    distribution.intervalProbabilities,
+    primary,
+    distribution.primaryProbabilities[primaryId],
+    primaryTop5,
+    secondary,
+    entropy(primaryDistribution),
+  )
+  return {
+    step: stepResult,
+    event: {
+      intervalBucket: bucketId,
+      intervalDays: bucket.median_days,
+      primary,
+      secondary,
+      age,
+    },
+  }
+}
+
+export async function runMonteCarlo(
+  visits: Visit[],
+  gender: number,
+  config: ModelConfig,
+  diagnoses: Diagnosis[],
+  samples: number,
+  seed: number,
+  onProgress?: (completed: number, total: number) => void,
+): Promise<MonteCarloResult> {
+  if (!visits.length || !visits.every((visit) => visit.primary)) {
+    throw new Error('请完整填写每次住院的主要诊断。')
+  }
+  const session = await loadModel(`/model/${config.model_file}`)
+  const random = mulberry32(seed)
+  const firstDistribution = await stepDistribution(session, visits, gender, config, [], 0)
+  const trajectories: Trajectory[] = []
+
+  for (let sample = 0; sample < samples; sample += 1) {
+    const steps: GeneratedStep[] = []
+    const prefix: FutureEvent[] = []
+    let currentAge = visits[visits.length - 1].age
+    for (let step = 0; step < config.model_dimensions.max_future; step += 1) {
+      const distribution =
+        step === 0
+          ? firstDistribution
+          : await stepDistribution(session, visits, gender, config, prefix, step)
+      const { step: generated, event } = sampleStep(
+        distribution,
+        currentAge,
+        config,
+        diagnoses,
+        random,
+        step,
+      )
+      currentAge = generated.age
+      steps.push(generated)
+      prefix.push(event)
+    }
+    trajectories.push({ id: sample, steps })
+    onProgress?.(sample + 1, samples)
+  }
+
+  const pathMap = new Map<string, { count: number; steps: GeneratedStep[] }>()
+  trajectories.forEach((trajectory) => {
+    const key = trajectory.steps.map((step) => step.primary.code).join(' → ')
+    const existing = pathMap.get(key)
+    if (existing) existing.count += 1
+    else pathMap.set(key, { count: 1, steps: trajectory.steps })
+  })
+  const paths: PathSummary[] = Array.from(pathMap.entries())
+    .map(([key, value]) => ({
+      key,
+      label: key,
+      count: value.count,
+      share: value.count / trajectories.length,
+      steps: value.steps,
+    }))
+    .sort((left, right) => right.count - left.count)
+
+  return { trajectories, paths, stepCount: config.model_dimensions.max_future, samples }
 }
