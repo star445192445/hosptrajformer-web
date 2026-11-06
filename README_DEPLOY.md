@@ -1,36 +1,56 @@
-# HospTrajFormer Web — Cloudflare Pages + R2 部署说明
+# HospTrajFormer Web — Cloudflare Pages 部署说明
 
 本应用是**纯静态前端 + 浏览器内 ONNX 推理**：没有后端、没有数据库、没有用户账号，
 用户输入只在当前浏览器内处理，不上传、不保存。
 
-## 为什么模型放 R2
+## 模型分片方案（无需 R2）
 
-Cloudflare Pages 免费版单个文件上限为 **25 MiB**（[官方 Limits](https://developers.cloudflare.com/pages/platform/limits/)）。
-当前 ONNX 模型约 **29.9 MiB**，不能直接放进 Pages 的 `dist/`。因此采用：
+Cloudflare Pages 免费版单文件上限为 **25 MiB**（[官方 Limits](https://developers.cloudflare.com/pages/platform/limits/)）。
+当前 ONNX 模型约 **29.9 MiB**，因此构建时把它拆成两个小于 25 MiB 的分片：
 
 ```text
-Cloudflare Pages  → 前端静态文件（HTML/JS/CSS/wasm/config/diagnoses）
-Cloudflare R2     → hosptrajformer_v7.onnx（公共桶 + CORS）
+public/model/chunks/
+  manifest.json
+  part-000.bin   （20,000,000 bytes）
+  part-001.bin   （11,330,098 bytes）
 ```
 
-浏览器从 Pages 加载页面，再从 R2 拉取模型；推理仍在浏览器内完成。
+页面启动时：
 
-## 1. 上传模型到 R2
+1. 读取 `manifest.json`；
+2. 并行下载两个分片；
+3. 在浏览器内存中拼接成完整 ONNX 字节流；
+4. 交给 ONNX Runtime Web 创建推理会话。
 
-1. Cloudflare Dashboard → R2 → Create bucket，例如 `hosptrajformer-model`；
-2. 上传 `public/model/hosptrajformer_v7.onnx`（约 29.9 MiB）；
-3. 设置公共访问：
-   - 使用 R2 公共开发地址 `https://pub-<hash>.r2.dev`，或
-   - 绑定自定义域名，例如 `https://static.example.com`；
-4. 配置 CORS，允许 Pages 域名读取模型。模板见 `deploy/r2-cors.json`：
-   - `AllowedOrigins` 填 `https://<project>.pages.dev` 和自定义域名；
-   - `AllowedMethods` 为 `GET, HEAD`；
-   - `AllowedHeaders` 为 `*`。
+模型仍从同一个 Pages 域名加载，**不需要 R2、不需要额外对象存储、没有 CORS 问题**。
 
-最终模型 URL 形如：
+## 1. 构建
+
+```bash
+cd Deployment/HospTrajFormer-Web/app
+pnpm install
+pnpm run build:pages
+```
+
+`build:pages` 会：
+
+- 构建前端；
+- 从 `dist/` 删除本地完整 ONNX 文件（避免 25 MiB 限制）；
+- 保留 `dist/model/chunks/` 分片。
+
+`dist/` 中应包含：
 
 ```text
-https://pub-xxxxxxxx.r2.dev/hosptrajformer_v7.onnx
+index.html
+assets/
+model/config.json
+model/diagnoses.json
+model/validation.json
+model/chunks/manifest.json
+model/chunks/part-000.bin
+model/chunks/part-001.bin
+_headers
+_redirects
 ```
 
 ## 2. GitHub 仓库
@@ -46,7 +66,7 @@ git remote -v
 如果没有 remote：
 
 ```bash
-git remote add origin https://github.com/<user>/hosptrajformer-web.git
+git remote add origin https://github.com/star445192445/hosptrajformer-web.git
 git branch -M main
 git push -u origin main
 ```
@@ -54,48 +74,53 @@ git push -u origin main
 注意：
 
 - `node_modules/`、`dist/` 不提交；
-- `public/model/*.onnx` 已加入 `.gitignore`，模型不放进 GitHub；
-- `config.json`、`diagnoses.json`、`validation.json` 仍随前端部署；
-- Cloudflare Pages 构建使用 `pnpm build:pages`，它会先构建、再从 `dist/` 删除本地 ONNX 模型，避免超过 25 MiB。
+- `public/model/*.onnx` 已加入 `.gitignore`，完整模型不进 GitHub；
+- `public/model/chunks/` 需要提交（两个分片均小于 GitHub 100 MB 单文件限制）；
+- `config.json`、`diagnoses.json`、`validation.json` 随前端部署。
 
 ## 3. Cloudflare Pages
 
-1. Workers & Pages → Create → Pages → Connect to Git；
-2. 选择仓库；
+1. Workers & Pages → Create → Pages（旧版 Pages 工作流）→ Connect to Git；
+2. GitHub 账号选 `star445192445`，仓库选 `hosptrajformer-web`；
 3. 构建配置：
-   - Root directory：`/`（仓库根就是 app）；
-   - Build command：`pnpm build:pages`；
-   - Build output directory：`dist`；
-   - 环境变量：
-     - `NODE_VERSION=22`
-     - `VITE_MODEL_URL=https://pub-xxxxxxxx.r2.dev/hosptrajformer_v7.onnx`
-       （Production 和 Preview 都建议设置；Preview 域名也要加进 R2 CORS）
-4. 部署后打开 `*.pages.dev`，检查模型是否成功从 R2 加载；
-5. 绑定自定义域名，Cloudflare 自动 HTTPS；
-6. 把自定义域名加入 R2 CORS 的 `AllowedOrigins`。
+   - Framework preset：无 / None
+   - Root directory：`/`
+   - Build command：`pnpm build:pages`
+   - Build output directory：`dist`
+   - 环境变量：`NODE_VERSION=22`
+4. 保存并部署；
+5. 打开 `https://hosptrajformer-web.pages.dev`。
+
+**不需要设置 `VITE_MODEL_URL`**。如果以后改用 R2 或外部模型地址，再设置该变量为完整 `.onnx` URL，应用会优先加载外部模型。
 
 ## 4. 本地开发
 
-本地保留 `public/model/hosptrajformer_v7.onnx`，不设置 `VITE_MODEL_URL` 时会回退到本地文件：
+本地完整模型仍在：
+
+```text
+public/model/hosptrajformer_v7.onnx
+```
+
+不设置 `VITE_MODEL_URL` 时，默认加载分片：
 
 ```bash
 pnpm run dev
 ```
 
-本地模拟 Pages 构建：
+分片位于 `public/model/chunks/`，本地 Vite 会直接提供。
+
+如果只想本地快速测试完整模型，可以临时设置：
 
 ```bash
-VITE_MODEL_URL=https://pub-xxxxxxxx.r2.dev/hosptrajformer_v7.onnx pnpm run build:pages
+VITE_MODEL_URL=/model/hosptrajformer_v7.onnx pnpm run dev
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:VITE_MODEL_URL="https://pub-xxxxxxxx.r2.dev/hosptrajformer_v7.onnx"
-pnpm run build:pages
+$env:VITE_MODEL_URL="/model/hosptrajformer_v7.onnx"
+pnpm run dev
 ```
-
-构建后 `dist/model/` 中不再包含 ONNX 文件，页面会从 R2 加载。
 
 ## 5. 公开前的隐私检查
 
@@ -103,25 +128,25 @@ pnpm run build:pages
 - 不接入统计、广告、用户行为分析脚本；
 - 不使用 Cookie、LocalStorage、IndexedDB 保存病史；
 - 输入只存在于当前页面内存，刷新即清空；
-- 模型与配置加载完成后，除 R2、静态资源外不再发起网络请求；
+- 模型加载后不再发起额外网络请求；
 - 不要输入姓名、身份证号、住院号等可识别信息；
 - 页面与模型卡均明确“非医疗器械、不构成诊断/治疗/预后建议”。
 
 ## 6. 常见问题
 
-**模型 404 / CORS 报错**
-- 检查 `VITE_MODEL_URL` 是否为公开可访问的 R2 URL；
-- 检查 R2 CORS 是否包含当前 Pages 域名（含 `*.pages.dev` 与自定义域名）；
-- 浏览器 DevTools → Network 查看 `.onnx` 请求的 CORS 响应头。
-
 **Cloudflare Pages 构建报文件过大**
-- 确认使用 `pnpm build:pages`，而不是 `pnpm build`；
-- 确认仓库中没有提交 `public/model/hosptrajformer_v7.onnx`；
-- 检查 `dist/model/` 是否只剩 JSON 文件。
+- 确认使用 `pnpm build:pages`，不是 `pnpm build`；
+- 确认 `public/model/hosptrajformer_v7.onnx` 没有被提交到 Git；
+- 确认 `dist/model/` 中只有 JSON 与 `chunks/`，没有 `.onnx`。
+
+**页面模型加载失败**
+- DevTools → Network 检查 `manifest.json`、两个 `.bin` 是否均返回 200；
+- 检查 `manifest.json` 中的文件名是否与分片一致；
+- 检查浏览器控制台是否有 ONNX Runtime 初始化错误。
 
 **首次加载慢**
-- 模型约 30 MB，建议在页面显示加载进度；
-- R2 与 Pages 均走 Cloudflare 网络，首次加载后浏览器会缓存模型（`_headers` 已配置长缓存）。
+- 模型约 30 MB，分为两个分片并行下载；
+- 分片设置了长缓存，首次加载后再次打开会走浏览器缓存。
 
 ## 7. 注意事项
 

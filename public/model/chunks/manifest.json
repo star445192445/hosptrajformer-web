@@ -1,0 +1,10 @@
+{
+  "model": "hosptrajformer_v7",
+  "version": "V7",
+  "bytes": 31330098,
+  "chunk_size": 20000000,
+  "chunks": [
+    "part-000.bin",
+    "part-001.bin"
+  ]
+}

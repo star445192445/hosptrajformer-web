@@ -2,14 +2,15 @@
 
 HospTrajFormer 多步住院轨迹生成研究演示。前端使用 React + TypeScript，通过 ONNX Runtime Web 在浏览器本地运行 V7 模型；无后端、无上传、无持久化。
 
-## 公开版（Cloudflare Pages + R2）
+## 公开版（Cloudflare Pages + 模型分片）
 
 - 首次进入显示研究演示与隐私确认页；无账号、无保存、无 LocalStorage；
-- 前端部署到 Cloudflare Pages；ONNX 模型放在 Cloudflare R2 公共桶（Pages 单文件上限 25 MiB，模型约 29.9 MiB）；
-- 模型地址通过构建环境变量 `VITE_MODEL_URL` 注入；本地开发留空时回退到 `public/model/hosptrajformer_v7.onnx`；
-- 生产构建使用 `pnpm build:pages`，会从 `dist/` 删除本地 ONNX 文件，避免超过 Pages 限制。
+- 前端部署到 Cloudflare Pages；ONNX 模型拆成两个小于 25 MiB 的分片，随前端一起部署；
+- 页面启动时读取 `model/chunks/manifest.json`，并行下载分片，在浏览器内存中拼接后交给 ONNX Runtime；
+- 不需要 R2、不需要额外对象存储、没有跨域问题；
+- 生产构建使用 `pnpm build:pages`，会从 `dist/` 删除完整 ONNX 文件，只保留分片。
 
-部署步骤见 [`README_DEPLOY.md`](README_DEPLOY.md)，CORS 模板见 [`deploy/r2-cors.json`](deploy/r2-cors.json)。
+部署步骤见 [`README_DEPLOY.md`](README_DEPLOY.md)。
 
 ## 当前版本（v2 重做）
 
@@ -46,7 +47,8 @@ pnpm run build:pages
 
 ## 模型文件
 
-- `public/model/hosptrajformer_v7.onnx`：本地开发用模型（不提交 Git，不进入 Pages 构建）；
+- `public/model/chunks/`：模型分片与清单（提交到 Git，随 Pages 部署）；
+- `public/model/hosptrajformer_v7.onnx`：本地完整模型（不提交 Git，仅本地开发）；
 - `public/model/config.json`：词表规模、标准化参数、时间桶与次要诊断阈值；
 - `public/model/diagnoses.json`：5,404 个 ICD-3 诊断编码与训练频次；
 - `public/model/validation.json`：PyTorch 与 ONNX Runtime 的一致性记录。
