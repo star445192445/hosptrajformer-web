@@ -69,16 +69,61 @@ function intervalZ(days: number, config: ModelConfig): number {
 }
 
 async function createSession(modelUrl: string): Promise<ort.InferenceSession> {
-  ort.env.wasm.numThreads = 1
-  ort.env.wasm.simd = true
+  configureRuntime()
   return ort.InferenceSession.create(modelUrl, {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all',
   })
 }
 
+interface ModelManifest {
+  bytes?: number
+  chunks: string[]
+}
+
+function configureRuntime() {
+  ort.env.wasm.numThreads = 1
+  ort.env.wasm.simd = true
+}
+
+async function createSessionFromManifest(manifestUrl: string): Promise<ort.InferenceSession> {
+  const response = await fetch(manifestUrl)
+  if (!response.ok) throw new Error(`无法读取模型清单：HTTP ${response.status}`)
+  const manifest = (await response.json()) as ModelManifest
+  if (!Array.isArray(manifest.chunks) || manifest.chunks.length === 0) {
+    throw new Error('模型清单缺少分片信息')
+  }
+  const base = manifestUrl.slice(0, manifestUrl.lastIndexOf('/') + 1)
+  const parts = await Promise.all(
+    manifest.chunks.map(async (name) => {
+      const part = await fetch(base + name)
+      if (!part.ok) throw new Error(`模型分片加载失败：${name}（HTTP ${part.status}）`)
+      return new Uint8Array(await part.arrayBuffer())
+    }),
+  )
+  const total = parts.reduce((sum, part) => sum + part.length, 0)
+  if (typeof manifest.bytes === 'number' && total !== manifest.bytes) {
+    throw new Error(`模型分片大小不符：${total} / ${manifest.bytes}`)
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  parts.forEach((part) => {
+    bytes.set(part, offset)
+    offset += part.length
+  })
+  configureRuntime()
+  return ort.InferenceSession.create(bytes.buffer, {
+    executionProviders: ['wasm'],
+    graphOptimizationLevel: 'all',
+  })
+}
+
 export function loadModel(modelUrl: string): Promise<ort.InferenceSession> {
-  if (!sessionPromise) sessionPromise = createSession(modelUrl)
+  if (!sessionPromise) {
+    sessionPromise = modelUrl.endsWith('.json')
+      ? createSessionFromManifest(modelUrl)
+      : createSession(modelUrl)
+  }
   return sessionPromise
 }
 

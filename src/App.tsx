@@ -20,6 +20,7 @@ import TechnicalPanel from './TechnicalPanel'
 import TimelineEditor from './TimelineEditor'
 import TrajectoryFan from './TrajectoryFan'
 import { CASES } from './cases'
+import { MODEL_URL } from './config'
 import { diagnosisLabel } from './diagnosisNames'
 import { loadModel, runGreedy, runMonteCarlo } from './inference'
 import type {
@@ -103,7 +104,7 @@ function App() {
         setDiagnoses(diagnosisList)
         setValidation(validationInfo)
         setProgressText('正在载入浏览器推理模型')
-        await loadModel(`/model/${modelConfig.model_file}`)
+        await loadModel(MODEL_URL)
         if (cancelled) return
         const map = new Map(diagnosisList.map((diagnosis) => [diagnosis.code, diagnosis]))
         const initial = CASES[3]
