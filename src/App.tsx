@@ -2,6 +2,7 @@ import {
   Activity,
   AlertCircle,
   Check,
+  Info,
   LoaderCircle,
   Play,
   RotateCcw,
@@ -10,6 +11,9 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import CasePicker from './CasePicker'
+import ConsentGate from './ConsentGate'
+import ModelCard from './ModelCard'
+import ReadingGuide from './ReadingGuide'
 import PathTable from './PathTable'
 import StepInspector from './StepInspector'
 import TechnicalPanel from './TechnicalPanel'
@@ -57,6 +61,8 @@ function App() {
   const [config, setConfig] = useState<ModelConfig | null>(null)
   const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([])
   const [validation, setValidation] = useState<ValidationInfo | null>(null)
+  const [accepted, setAccepted] = useState(false)
+  const [modelCardOpen, setModelCardOpen] = useState(false)
   const [status, setStatus] = useState<ModelStatus>('loading')
   const [progressText, setProgressText] = useState('正在载入模型资源')
   const [visits, setVisits] = useState<Visit[]>([])
@@ -208,6 +214,9 @@ function App() {
   const sampleCount = result?.kind === 'sample' ? result.mc.samples : result?.kind === 'greedy' ? 1 : 0
   const modeLabel = result?.kind === 'sample' ? `Monte Carlo · ${samples} 条` : '逐步贪心 · 1 条'
   const selectedPath = paths.find((path) => path.key === selectedPathKey) ?? paths[0] ?? null
+  const topShare = paths[0]?.share ?? 0
+
+  if (!accepted) return <ConsentGate onAccept={() => setAccepted(true)} />
 
   return (
     <div className="app-shell">
@@ -222,6 +231,9 @@ function App() {
         <div className="topbar-right">
           <span className="top-chip"><ShieldCheck size={14} /> 浏览器本地推理</span>
           <span className="top-chip">V7 · {config?.model_dimensions.diagnosis_vocabulary.toLocaleString('zh-CN') ?? '5,406'} 词元</span>
+          <button type="button" className="top-chip top-chip-button" onClick={() => setModelCardOpen(true)}>
+            <Info size={14} /> 模型卡
+          </button>
           <span className={`status-pill ${status}`}>
             {status === 'loading' || status === 'running' ? <LoaderCircle size={14} className="spin" /> : <i />}
             {progressText}
@@ -313,6 +325,7 @@ function App() {
                 <div className="summary-stats">
                   <span><strong>{sampleCount}</strong> 条轨迹</span>
                   <span><strong>{paths.length}</strong> 条不同诊断序列</span>
+                  <span><strong>{(topShare * 100).toFixed(0)}%</strong> 最高频路径</span>
                   <span><strong>{latency === null ? '—' : latency < 100 ? '<0.1' : (latency / 1000).toFixed(2)}</strong> s</span>
                   <span className="summary-mode">{modeLabel}</span>
                 </div>
@@ -349,6 +362,13 @@ function App() {
                 </section>
               )}
 
+              <ReadingGuide />
+
+              <div className="result-disclaimer">
+                <ShieldCheck size={15} />
+                <span>以上为研究演示输出；候选路径与百分比不是个体预测，不构成诊断或治疗建议。</span>
+              </div>
+
               <TechnicalPanel
                 config={config}
                 validation={validation}
@@ -365,6 +385,8 @@ function App() {
         <span>HospTrajFormer · 研究演示</span>
         <p>仅供科研与教学；不用于临床诊断、治疗决策或个体预后判断。合成病例不含真实患者信息。</p>
       </footer>
+
+      {modelCardOpen && <ModelCard onClose={() => setModelCardOpen(false)} />}
     </div>
   )
 }

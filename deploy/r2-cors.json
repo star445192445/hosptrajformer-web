@@ -1,0 +1,12 @@
+[
+  {
+    "AllowedOrigins": [
+      "https://<your-project>.pages.dev",
+      "https://<your-custom-domain>"
+    ],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag", "Content-Length"],
+    "MaxAgeSeconds": 3600
+  }
+]
