@@ -5,7 +5,7 @@ const model = new URL('../dist/model/hosptrajformer_v7.onnx', import.meta.url)
 
 if (existsSync(model)) {
   await rm(model)
-  console.log('Removed local ONNX model from dist; production loads it from VITE_MODEL_URL (R2).')
+  console.log('Removed local ONNX model from dist; Pages loads model chunks from /model/chunks/.')
 } else {
-  console.log('No local ONNX model in dist; expecting VITE_MODEL_URL (R2).')
+  console.log('No local ONNX model in dist; using /model/chunks/.')
 }
