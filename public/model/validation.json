@@ -11,7 +11,9 @@
     "secondary_logits": 2.472913735118709e-06
   },
   "passed": true,
-  "onnx_path": "E:\\Paper\\博士课题\\Deployment\\HospTrajFormer-Web\\app\\public\\model\\hosptrajformer_v7.onnx",
-  "onnx_size_bytes": 31330098,
-  "checkpoint_path": "E:\\Paper\\博士课题\\Outputs\\final_selected\\model\\factorial\\best_model_V7.pt"
+  "model_file": "hosptrajformer_v7.onnx",
+  "model_sha256": "fbd31996514cc99fadc4590e7f6189f8b5d529ef2a2a9bdbebd4e39e2ad599ef",
+  "model_size_bytes": 31330098,
+  "checkpoint": "best_model_V7.pt",
+  "note": "Synthetic-tensor export parity only; not a per-case web end-to-end validation."
 }
