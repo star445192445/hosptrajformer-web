@@ -1002,3 +1002,21 @@ h1, h2, h3, h4 {
   .result-tabs button { font-size: 11px; }
   .path-row { grid-template-columns: 20px repeat(3, minmax(0, 1fr)) 52px; }
 }
+
+
+/* custom-history entry */
+.case-card-custom {
+  grid-column: 1 / -1;
+  border-style: dashed;
+  background: #fbfcfd;
+}
+.case-card-custom .case-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent-dark);
+}
+.case-card-custom.active {
+  border-style: solid;
+  background: var(--accent-soft);
+}

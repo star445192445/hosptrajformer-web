@@ -183,6 +183,23 @@ function App() {
     clearResult()
   }
 
+  function startCustom() {
+    if (busy) return
+    if (!activeCaseId && visits.length > 0) {
+      setMobileView('input')
+      document.querySelector('.editor-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    setVisits([emptyVisit(50)])
+    setGender(1)
+    setActiveCaseId('')
+    setMobileView('input')
+    clearResult()
+    window.setTimeout(() => {
+      document.querySelector('.editor-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 50)
+  }
+
   function updateVisits(next: Visit[]) {
     if (busy) return
     setVisits(next)
@@ -345,15 +362,21 @@ function App() {
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">SYNTHETIC CASES</span>
-                <h2>选择演示病例</h2>
+                <h2>选择病例或输入自己的记录</h2>
               </div>
               <button type="button" className="icon-quiet" title="重置病例" aria-label="重置病例" onClick={reset} disabled={busy}>
                 <RotateCcw size={16} />
               </button>
             </div>
-            <CasePicker cases={CASES} activeId={activeCaseId} onSelect={loadCase} />
+            <CasePicker
+              cases={CASES}
+              activeId={activeCaseId}
+              customActive={!activeCaseId && visits.length > 0}
+              onSelect={loadCase}
+              onCustom={startCustom}
+            />
             <p className="case-note">
-              所有病例均为合成示例，不含真实患者信息；可直接生成，也可展开修改。
+              所有示例均为合成病例；也可以点“输入自己的病史”，从空白记录开始逐条填写。请勿输入姓名、住院号等可识别信息。
             </p>
           </section>
 
@@ -412,7 +435,7 @@ function App() {
               <span className="empty-icon"><Sparkles size={26} /></span>
               <h2>从历史轨迹生成未来三步候选</h2>
               <p>
-                选择左侧合成病例，或展开住院记录修改年龄、间隔与诊断。模型会生成未来三个住院位置的
+                选择左侧合成病例，或点“输入自己的病史”从空白记录开始填写年龄、间隔与诊断。模型会生成未来三个住院位置的
                 时间间隔、主要诊断与次要诊断候选；它不预测患者是否还会再次住院。
               </p>
               <div className="empty-points">
