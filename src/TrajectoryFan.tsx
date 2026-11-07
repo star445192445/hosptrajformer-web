@@ -29,18 +29,6 @@ export default function TrajectoryFan({ paths, selectedKey, onSelect }: Trajecto
     })
   }, [topPaths])
 
-  const stepBuckets = useMemo(() => {
-    return [0, 1, 2].map((step) => {
-      const counts = new Map<string, number>()
-      topPaths.forEach((path) => {
-        const label = path.steps[step]?.interval.label
-        if (!label) return
-        counts.set(label, (counts.get(label) ?? 0) + path.count)
-      })
-      return Array.from(counts.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] ?? ''
-    })
-  }, [topPaths])
-
   if (!topPaths.length) return null
 
   return (
@@ -54,9 +42,6 @@ export default function TrajectoryFan({ paths, selectedKey, onSelect }: Trajecto
           <g key={step}>
             <text x={STEP_X[step]} y={34} className="fan-step-label" textAnchor="middle">
               未来第 {step + 1} 步
-            </text>
-            <text x={STEP_X[step]} y={52} className="fan-step-sub" textAnchor="middle">
-              最常见间隔：{stepBuckets[step]}
             </text>
             <line x1={STEP_X[step]} x2={STEP_X[step]} y1={62} y2={296} className="fan-guide" />
           </g>

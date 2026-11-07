@@ -1,4 +1,5 @@
 import * as ort from 'onnxruntime-web'
+import { MODEL_URL } from './config'
 import type {
   Diagnosis,
   GeneratedStep,
@@ -78,7 +79,23 @@ async function createSession(modelUrl: string): Promise<ort.InferenceSession> {
 
 interface ModelManifest {
   bytes?: number
+  sha256?: string
   chunks: string[]
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = 45000): Promise<Response> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest)).map((value) => value.toString(16).padStart(2, '0')).join('')
 }
 
 function configureRuntime() {
@@ -87,8 +104,11 @@ function configureRuntime() {
 }
 
 async function createSessionFromManifest(manifestUrl: string): Promise<ort.InferenceSession> {
-  const response = await fetch(manifestUrl)
+  const response = await fetchWithTimeout(manifestUrl)
   if (!response.ok) throw new Error(`无法读取模型清单：HTTP ${response.status}`)
+  if ((response.headers.get('content-type') ?? '').includes('text/html')) {
+    throw new Error('模型清单返回了 HTML，请检查静态资源是否部署正确。')
+  }
   const manifest = (await response.json()) as ModelManifest
   if (!Array.isArray(manifest.chunks) || manifest.chunks.length === 0) {
     throw new Error('模型清单缺少分片信息')
@@ -96,8 +116,11 @@ async function createSessionFromManifest(manifestUrl: string): Promise<ort.Infer
   const base = manifestUrl.slice(0, manifestUrl.lastIndexOf('/') + 1)
   const parts = await Promise.all(
     manifest.chunks.map(async (name) => {
-      const part = await fetch(base + name)
+      const part = await fetchWithTimeout(base + name)
       if (!part.ok) throw new Error(`模型分片加载失败：${name}（HTTP ${part.status}）`)
+      if ((part.headers.get('content-type') ?? '').includes('text/html')) {
+        throw new Error(`模型分片返回了 HTML：${name}，请检查静态资源是否部署正确。`)
+      }
       return new Uint8Array(await part.arrayBuffer())
     }),
   )
@@ -111,6 +134,12 @@ async function createSessionFromManifest(manifestUrl: string): Promise<ort.Infer
     bytes.set(part, offset)
     offset += part.length
   })
+  if (manifest.sha256) {
+    const actual = await sha256Hex(bytes.buffer)
+    if (actual.toLowerCase() !== manifest.sha256.toLowerCase()) {
+      throw new Error('模型分片 SHA-256 校验失败，请重新部署模型分片。')
+    }
+  }
   configureRuntime()
   return ort.InferenceSession.create(bytes.buffer, {
     executionProviders: ['wasm'],
@@ -118,11 +147,14 @@ async function createSessionFromManifest(manifestUrl: string): Promise<ort.Infer
   })
 }
 
-export function loadModel(modelUrl: string): Promise<ort.InferenceSession> {
+export function loadModel(): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
-    sessionPromise = modelUrl.endsWith('.json')
-      ? createSessionFromManifest(modelUrl)
-      : createSession(modelUrl)
+    sessionPromise = MODEL_URL.endsWith('.json')
+      ? createSessionFromManifest(MODEL_URL)
+      : createSession(MODEL_URL)
+    sessionPromise.catch(() => {
+      sessionPromise = null
+    })
   }
   return sessionPromise
 }
@@ -184,7 +216,7 @@ function buildFeeds(
     const days = visitIndex === 0 ? 0 : Math.max(1, visit.intervalDays)
     const bucketId = visitIndex === 0 ? 0 : bucketIdForDays(days)
     histDt[visitIndex] = bucketId
-    histDtCont[visitIndex] = visitIndex === 0 ? 0 : intervalZ(days, config)
+    histDtCont[visitIndex] = intervalZ(days, config)
     histPrimary[visitIndex] = visit.primary?.id ?? config.special_tokens.unknown
     histAge[visitIndex] = ageZ(visit.age, config)
     histVisitMask[visitIndex] = true
@@ -339,7 +371,7 @@ export async function runGreedy(
   if (!visits.length || !visits.every((visit) => visit.primary)) {
     throw new Error('请完整填写每次住院的主要诊断。')
   }
-  const session = await loadModel(`/model/${config.model_file}`)
+  const session = await loadModel()
   const prefix: FutureEvent[] = []
   const steps: GeneratedStep[] = []
   let currentAge = visits[visits.length - 1].age
@@ -453,12 +485,13 @@ export async function runMonteCarlo(
   if (!visits.length || !visits.every((visit) => visit.primary)) {
     throw new Error('请完整填写每次住院的主要诊断。')
   }
-  const session = await loadModel(`/model/${config.model_file}`)
+  const safeSamples = Math.max(1, Math.min(50, Math.trunc(Number(samples) || 0)))
+  const session = await loadModel()
   const random = mulberry32(seed)
   const firstDistribution = await stepDistribution(session, visits, gender, config, [], 0)
   const trajectories: Trajectory[] = []
 
-  for (let sample = 0; sample < samples; sample += 1) {
+  for (let sample = 0; sample < safeSamples; sample += 1) {
     const steps: GeneratedStep[] = []
     const prefix: FutureEvent[] = []
     let currentAge = visits[visits.length - 1].age
@@ -480,7 +513,7 @@ export async function runMonteCarlo(
       prefix.push(event)
     }
     trajectories.push({ id: sample, steps })
-    onProgress?.(sample + 1, samples)
+    onProgress?.(sample + 1, safeSamples)
   }
 
   const pathMap = new Map<string, { count: number; steps: GeneratedStep[] }>()
@@ -500,5 +533,5 @@ export async function runMonteCarlo(
     }))
     .sort((left, right) => right.count - left.count)
 
-  return { trajectories, paths, stepCount: config.model_dimensions.max_future, samples }
+  return { trajectories, paths, stepCount: config.model_dimensions.max_future, samples: safeSamples }
 }

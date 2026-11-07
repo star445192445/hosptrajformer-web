@@ -1,26 +1,29 @@
 import {
-  Activity,
   AlertCircle,
+  BarChart3,
   Check,
   Info,
   LoaderCircle,
   Play,
+  RefreshCw,
   RotateCcw,
   ShieldCheck,
   Sparkles,
+  Table2,
+  Waypoints,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import CasePicker from './CasePicker'
 import ConsentGate from './ConsentGate'
+import GreedyTimeline from './GreedyTimeline'
 import ModelCard from './ModelCard'
-import ReadingGuide from './ReadingGuide'
 import PathTable from './PathTable'
+import ReadingGuide from './ReadingGuide'
 import StepInspector from './StepInspector'
 import TechnicalPanel from './TechnicalPanel'
 import TimelineEditor from './TimelineEditor'
 import TrajectoryFan from './TrajectoryFan'
 import { CASES } from './cases'
-import { MODEL_URL } from './config'
 import { diagnosisLabel } from './diagnosisNames'
 import { loadModel, runGreedy, runMonteCarlo } from './inference'
 import type {
@@ -45,6 +48,31 @@ type RunResult =
   | { kind: 'greedy'; trajectory: Trajectory }
   | { kind: 'sample'; mc: MonteCarloResult }
 
+type ResultTab = 'paths' | 'steps' | 'branches'
+type MobileView = 'input' | 'result'
+
+const SAMPLE_OPTIONS = [10, 20, 30, 50] as const
+const DEFAULT_SAMPLE = 20
+
+function parseSampleCount(raw: string | null): number {
+  const value = Number(raw)
+  return SAMPLE_OPTIONS.includes(value as (typeof SAMPLE_OPTIONS)[number]) ? value : DEFAULT_SAMPLE
+}
+
+function parseMode(raw: string | null): DecodingMode {
+  return raw === 'greedy' ? 'greedy' : 'sample'
+}
+
+function emptyVisit(age = 45): Visit {
+  return {
+    uid: Math.random().toString(36).slice(2, 10),
+    age,
+    intervalDays: 0,
+    primary: null,
+    secondary: [],
+  }
+}
+
 function caseVisits(item: CaseDefinition, diagnosisByCode: Map<string, Diagnosis>): Visit[] {
   return item.visits.map((visit) => ({
     uid: Math.random().toString(36).slice(2, 10),
@@ -65,34 +93,42 @@ function App() {
   const [accepted, setAccepted] = useState(false)
   const [modelCardOpen, setModelCardOpen] = useState(false)
   const [status, setStatus] = useState<ModelStatus>('loading')
-  const [progressText, setProgressText] = useState('正在载入模型资源')
+  const [progressText, setProgressText] = useState('等待开始')
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [visits, setVisits] = useState<Visit[]>([])
   const [gender, setGender] = useState(1)
   const [activeCaseId, setActiveCaseId] = useState('')
-  const demoMode = new URLSearchParams(window.location.search).get('demo')
-  const [mode, setMode] = useState<DecodingMode>(demoMode === 'greedy' ? 'greedy' : 'sample')
-  const [samples, setSamples] = useState(Number(new URLSearchParams(window.location.search).get('samples')) || 20)
+  const [mode, setMode] = useState<DecodingMode>(() => parseMode(new URLSearchParams(window.location.search).get('demo')))
+  const [samples, setSamples] = useState(() => parseSampleCount(new URLSearchParams(window.location.search).get('samples')))
   const [seed] = useState(20261104)
   const [result, setResult] = useState<RunResult | null>(null)
+  const [resultTab, setResultTab] = useState<ResultTab>('paths')
+  const [mobileView, setMobileView] = useState<MobileView>('input')
   const [selectedPathKey, setSelectedPathKey] = useState<string | null>(null)
   const [activeStep, setActiveStep] = useState(0)
   const [latency, setLatency] = useState<number | null>(null)
   const [mcProgress, setMcProgress] = useState(0)
   const [error, setError] = useState('')
+  const runToken = useRef(0)
+  const autoRan = useRef(false)
 
+  const demoMode = new URLSearchParams(window.location.search).get('demo')
   const diagnosisByCode = useMemo(
     () => new Map(diagnoses.map((diagnosis) => [diagnosis.code, diagnosis])),
     [diagnoses],
   )
 
   const activeCase = CASES.find((item) => item.id === activeCaseId)
-  const autoRan = useRef(false)
   const ready = status === 'ready'
   const busy = status === 'running'
   const canRun = ready && visits.length > 0 && visits.every((visit) => visit.primary)
 
   useEffect(() => {
+    if (!accepted) return
     let cancelled = false
+    setStatus('loading')
+    setError('')
+    setProgressText('正在载入模型资源')
     Promise.all([
       fetch('/model/config.json').then((response) => response.json() as Promise<ModelConfig>),
       fetch('/model/diagnoses.json').then((response) => response.json() as Promise<Diagnosis[]>),
@@ -104,13 +140,15 @@ function App() {
         setDiagnoses(diagnosisList)
         setValidation(validationInfo)
         setProgressText('正在载入浏览器推理模型')
-        await loadModel(MODEL_URL)
+        await loadModel()
         if (cancelled) return
-        const map = new Map(diagnosisList.map((diagnosis) => [diagnosis.code, diagnosis]))
-        const initial = CASES[3]
-        setVisits(caseVisits(initial, map))
-        setGender(initial.gender)
-        setActiveCaseId(initial.id)
+        if (visits.length === 0) {
+          const initial = CASES[3]
+          const map = new Map(diagnosisList.map((diagnosis) => [diagnosis.code, diagnosis]))
+          setVisits(caseVisits(initial, map))
+          setGender(initial.gender)
+          setActiveCaseId(initial.id)
+        }
         setStatus('ready')
         setProgressText('模型已就绪')
       })
@@ -123,74 +161,122 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [accepted, loadAttempt])
+
+  function clearResult() {
+    runToken.current += 1
+    setResult(null)
+    setSelectedPathKey(null)
+    setActiveStep(0)
+    setResultTab('paths')
+    setError('')
+  }
 
   function loadCase(id: string) {
+    if (busy) return
     const item = CASES.find((entry) => entry.id === id)
     if (!item) return
     setVisits(caseVisits(item, diagnosisByCode))
     setGender(item.gender)
     setActiveCaseId(id)
-    setResult(null)
-    setSelectedPathKey(null)
-    setActiveStep(0)
-    setError('')
+    setMobileView('input')
+    clearResult()
   }
 
   function updateVisits(next: Visit[]) {
+    if (busy) return
     setVisits(next)
     setActiveCaseId('')
-    setResult(null)
-    setSelectedPathKey(null)
-    setError('')
+    clearResult()
+  }
+
+  function changeGender(value: number) {
+    if (busy) return
+    setGender(value)
+    setActiveCaseId('')
+    clearResult()
+  }
+
+  function changeMode(value: DecodingMode) {
+    if (busy) return
+    setMode(value)
+    clearResult()
+  }
+
+  function changeSamples(value: number) {
+    if (busy) return
+    setSamples(value)
+    clearResult()
   }
 
   function reset() {
-    if (activeCase) loadCase(activeCase.id)
-    else {
-      setVisits([])
-      setResult(null)
-      setSelectedPathKey(null)
+    if (busy) return
+    if (activeCase) {
+      loadCase(activeCase.id)
+      return
     }
+    setVisits([emptyVisit()])
+    setActiveCaseId('')
+    clearResult()
+  }
+
+  function retryLoad() {
+    setLoadAttempt((value) => value + 1)
   }
 
   useEffect(() => {
-    if (!demoMode || autoRan.current) return
+    if (!accepted || !demoMode || autoRan.current) return
     if (status !== 'ready' || !canRun) return
     autoRan.current = true
     void runModel()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, visits, canRun, demoMode])
+  }, [accepted, demoMode, status, canRun])
 
   async function runModel() {
-    if (!config || !canRun) return
+    if (!config || !canRun || busy) return
+    const token = runToken.current + 1
+    runToken.current = token
+    const snapshot = { visits, gender, mode, samples }
     setStatus('running')
     setError('')
     setResult(null)
     setSelectedPathKey(null)
     setActiveStep(0)
+    setResultTab('paths')
     setMcProgress(0)
     const started = Date.now()
     try {
-      if (mode === 'greedy') {
+      if (snapshot.mode === 'greedy') {
         setProgressText('正在生成逐步贪心轨迹')
-        const trajectory = await runGreedy(visits, gender, config, diagnoses)
+        const trajectory = await runGreedy(snapshot.visits, snapshot.gender, config, diagnoses)
+        if (token !== runToken.current) return
         setResult({ kind: 'greedy', trajectory })
-        setSelectedPathKey(trajectory.steps.map((step) => step.primary.code).join(' → '))
       } else {
         setProgressText('正在抽样候选轨迹')
-        const mc = await runMonteCarlo(visits, gender, config, diagnoses, samples, seed, (completed, total) => {
-          setMcProgress(completed / total)
-          setProgressText(`已抽样 ${completed}/${total} 条候选轨迹`)
-        })
+        const mc = await runMonteCarlo(
+          snapshot.visits,
+          snapshot.gender,
+          config,
+          diagnoses,
+          snapshot.samples,
+          seed,
+          (completed, total) => {
+            if (token !== runToken.current) return
+            setMcProgress(completed / total)
+            setProgressText(`已抽样 ${completed}/${total} 条候选轨迹`)
+          },
+        )
+        if (token !== runToken.current) return
         setResult({ kind: 'sample', mc })
         setSelectedPathKey(mc.paths[0]?.key ?? null)
       }
       setLatency(Date.now() - started)
       setStatus('ready')
       setProgressText('生成完成')
+      setMobileView('result')
     } catch (reason) {
-      setStatus('error')
+      if (token !== runToken.current) return
+      setStatus('ready')
       setProgressText('生成失败')
       setError(reason instanceof Error ? reason.message : '推理过程发生异常。')
     }
@@ -212,10 +298,9 @@ function App() {
       : result?.kind === 'sample'
         ? result.mc.paths
         : []
-  const sampleCount = result?.kind === 'sample' ? result.mc.samples : result?.kind === 'greedy' ? 1 : 0
-  const modeLabel = result?.kind === 'sample' ? `Monte Carlo · ${samples} 条` : '逐步贪心 · 1 条'
-  const selectedPath = paths.find((path) => path.key === selectedPathKey) ?? paths[0] ?? null
-  const topShare = paths[0]?.share ?? 0
+  const sampleCount = result?.kind === 'sample' ? result.mc.samples : 0
+  const modeLabel = result?.kind === 'sample' ? `概率抽样 · ${sampleCount} 条` : '逐步贪心 · 1 条'
+  const selectedPath = result?.kind === 'sample' ? paths.find((path) => path.key === selectedPathKey) ?? paths[0] ?? null : null
 
   if (!accepted) return <ConsentGate onAccept={() => setAccepted(true)} />
 
@@ -226,12 +311,10 @@ function App() {
           <span className="brand-mark">HTF</span>
           <div>
             <strong>HospTrajFormer</strong>
-            <span>多步住院轨迹生成 · 研究演示</span>
+            <span>研究演示 · 浏览器本地推理</span>
           </div>
         </div>
         <div className="topbar-right">
-          <span className="top-chip"><ShieldCheck size={14} /> 浏览器本地推理</span>
-          <span className="top-chip">V7 · {config?.model_dimensions.diagnosis_vocabulary.toLocaleString('zh-CN') ?? '5,406'} 词元</span>
           <button type="button" className="top-chip top-chip-button" onClick={() => setModelCardOpen(true)}>
             <Info size={14} /> 模型卡
           </button>
@@ -239,10 +322,24 @@ function App() {
             {status === 'loading' || status === 'running' ? <LoaderCircle size={14} className="spin" /> : <i />}
             {progressText}
           </span>
+          {status === 'error' && (
+            <button type="button" className="ghost-button compact-button" onClick={retryLoad}>
+              <RefreshCw size={14} /> 重试
+            </button>
+          )}
         </div>
       </header>
 
-      <main className="workspace">
+      <div className="mobile-view-tabs" role="tablist" aria-label="手机视图切换">
+        <button type="button" role="tab" aria-selected={mobileView === 'input'} className={mobileView === 'input' ? 'active' : ''} onClick={() => setMobileView('input')}>
+          输入
+        </button>
+        <button type="button" role="tab" aria-selected={mobileView === 'result'} className={mobileView === 'result' ? 'active' : ''} onClick={() => setMobileView('result')} disabled={!result}>
+          结果
+        </button>
+      </div>
+
+      <main className={`workspace mobile-${mobileView}`}>
         <aside className="left-rail">
           <section className="case-panel">
             <div className="panel-heading">
@@ -250,13 +347,13 @@ function App() {
                 <span className="eyebrow">SYNTHETIC CASES</span>
                 <h2>选择演示病例</h2>
               </div>
-              <button type="button" className="icon-quiet" title="重置病例" aria-label="重置病例" onClick={reset}>
+              <button type="button" className="icon-quiet" title="重置病例" aria-label="重置病例" onClick={reset} disabled={busy}>
                 <RotateCcw size={16} />
               </button>
             </div>
             <CasePicker cases={CASES} activeId={activeCaseId} onSelect={loadCase} />
             <p className="case-note">
-              {activeCase ? activeCase.note : '当前为自定义轨迹；所有病例均为合成示例，不含真实患者信息。'}
+              所有病例均为合成示例，不含真实患者信息；可直接生成，也可展开修改。
             </p>
           </section>
 
@@ -264,48 +361,59 @@ function App() {
             visits={visits}
             gender={gender}
             diagnoses={diagnoses}
-            onGenderChange={setGender}
+            onGenderChange={changeGender}
             onChange={updateVisits}
+            busy={busy}
           />
 
           <section className="run-panel">
+            <div className="run-heading">
+              <span className="eyebrow">GENERATE</span>
+              {busy && <small>推理中，输入已锁定</small>}
+            </div>
             <div className="mode-switch" role="group" aria-label="解码模式">
-              <button type="button" className={mode === 'sample' ? 'active' : ''} onClick={() => setMode('sample')}>
+              <button type="button" className={mode === 'sample' ? 'active' : ''} onClick={() => changeMode('sample')} disabled={busy}>
                 概率抽样
               </button>
-              <button type="button" className={mode === 'greedy' ? 'active' : ''} onClick={() => setMode('greedy')}>
+              <button type="button" className={mode === 'greedy' ? 'active' : ''} onClick={() => changeMode('greedy')} disabled={busy}>
                 逐步贪心
               </button>
             </div>
             {mode === 'sample' && (
               <label className="sample-control">
                 <span>候选轨迹数</span>
-                <select value={samples} onChange={(event) => setSamples(Number(event.target.value))}>
-                  {[10, 20, 30, 50].map((value) => (
+                <select value={samples} onChange={(event) => changeSamples(Number(event.target.value))} disabled={busy}>
+                  {SAMPLE_OPTIONS.map((value) => (
                     <option key={value} value={value}>{value} 条</option>
                   ))}
                 </select>
               </label>
             )}
             <button type="button" className="primary-button" disabled={!canRun || busy} onClick={runModel}>
-              {status === 'running' ? <LoaderCircle size={17} className="spin" /> : <Play size={17} fill="currentColor" />}
-              {mode === 'sample' ? '生成候选轨迹' : '生成确定性轨迹'}
+              {busy ? <LoaderCircle size={17} className="spin" /> : <Play size={17} fill="currentColor" />}
+              {mode === 'sample' ? '生成候选轨迹' : '生成贪心轨迹'}
             </button>
-            {status === 'running' && mode === 'sample' && (
+            {busy && mode === 'sample' && (
               <div className="progress-track"><i style={{ width: `${mcProgress * 100}%` }} /></div>
             )}
-            {error && <div className="error-banner"><AlertCircle size={16} />{error}</div>}
+            {error && (
+              <div className="error-banner">
+                <AlertCircle size={16} />
+                <span>{error}</span>
+                {status === 'error' && <button type="button" onClick={retryLoad}>重新加载</button>}
+              </div>
+            )}
           </section>
         </aside>
 
         <section className="result-column" aria-live="polite">
           {!result ? (
             <div className="empty-state">
-              <span className="empty-icon"><Sparkles size={28} /></span>
+              <span className="empty-icon"><Sparkles size={26} /></span>
               <h2>从历史轨迹生成未来三步候选</h2>
               <p>
-                左侧选择合成病例，或直接编辑年龄、住院间隔与诊断；模型将输出未来三次住院的时间间隔、
-                主要诊断与次要诊断候选。概率抽样会生成多条候选轨迹，逐步贪心只给出一条确定性路径。
+                选择左侧合成病例，或展开住院记录修改年龄、间隔与诊断。模型会生成未来三个住院位置的
+                时间间隔、主要诊断与次要诊断候选；它不预测患者是否还会再次住院。
               </p>
               <div className="empty-points">
                 <span><Check size={14} /> 浏览器内运行</span>
@@ -320,56 +428,70 @@ function App() {
             <div className="result-stack">
               <div className="result-summary">
                 <div>
-                  <span className="eyebrow">GENERATION SUMMARY</span>
-                  <h2>未来三步候选轨迹</h2>
+                  <span className="eyebrow">GENERATION RESULT</span>
+                  <h2>{result.kind === 'sample' ? '未来三步候选路径' : '逐步贪心候选路径'}</h2>
+                  <p className="result-subline">显示三步候选，不预测是否会再次住院；仅供研究演示。</p>
                 </div>
                 <div className="summary-stats">
-                  <span><strong>{sampleCount}</strong> 条轨迹</span>
-                  <span><strong>{paths.length}</strong> 条不同诊断序列</span>
-                  <span><strong>{(topShare * 100).toFixed(0)}%</strong> 最高频路径</span>
-                  <span><strong>{latency === null ? '—' : latency < 100 ? '<0.1' : (latency / 1000).toFixed(2)}</strong> s</span>
+                  {result.kind === 'sample' ? (
+                    <>
+                      <span><strong>{sampleCount}</strong> 条抽样</span>
+                      <span><strong>{paths.length}</strong> 种主要诊断序列</span>
+                      <span><strong>{paths[0]?.count ?? 0}/{sampleCount}</strong> 最高频序列</span>
+                    </>
+                  ) : (
+                    <span><strong>1</strong> 条贪心轨迹</span>
+                  )}
                   <span className="summary-mode">{modeLabel}</span>
                 </div>
               </div>
 
-              <TrajectoryFan paths={paths} selectedKey={selectedPathKey} onSelect={setSelectedPathKey} />
+              <div className="result-tabs" role="tablist" aria-label="结果视图">
+                <button type="button" role="tab" aria-selected={resultTab === 'paths'} className={resultTab === 'paths' ? 'active' : ''} onClick={() => setResultTab('paths')}>
+                  <Table2 size={15} /> {result.kind === 'sample' ? '候选路径' : '贪心轨迹'}
+                </button>
+                <button type="button" role="tab" aria-selected={resultTab === 'steps'} className={resultTab === 'steps' ? 'active' : ''} onClick={() => setResultTab('steps')}>
+                  <BarChart3 size={15} /> 逐步分布
+                </button>
+                {result.kind === 'sample' && (
+                  <button type="button" role="tab" aria-selected={resultTab === 'branches'} className={resultTab === 'branches' ? 'active' : ''} onClick={() => setResultTab('branches')}>
+                    <Waypoints size={15} /> 分支图
+                  </button>
+                )}
+              </div>
 
-              <PathTable
-                paths={paths}
-                selectedKey={selectedPathKey}
-                samples={sampleCount}
-                onSelect={setSelectedPathKey}
-              />
+              {resultTab === 'paths' && result.kind === 'sample' && (
+                <PathTable paths={paths} selectedKey={selectedPathKey} samples={sampleCount} onSelect={setSelectedPathKey} />
+              )}
+              {resultTab === 'paths' && result.kind === 'greedy' && <GreedyTimeline trajectory={result.trajectory} />}
+              {resultTab === 'steps' && (
+                <StepInspector
+                  trajectories={trajectories}
+                  buckets={config?.time_buckets ?? []}
+                  activeStep={activeStep}
+                  onStepChange={setActiveStep}
+                />
+              )}
+              {resultTab === 'branches' && result.kind === 'sample' && (
+                <TrajectoryFan paths={paths} selectedKey={selectedPathKey} onSelect={setSelectedPathKey} />
+              )}
 
-              <StepInspector
-                trajectories={trajectories}
-                buckets={config?.time_buckets ?? []}
-                activeStep={activeStep}
-                onStepChange={setActiveStep}
-              />
-
-              {selectedPath && (
+              {result.kind === 'sample' && selectedPath && resultTab === 'paths' && (
                 <section className="selected-path">
-                  <span className="eyebrow">SELECTED PATH</span>
+                  <span className="eyebrow">SELECTED SEQUENCE</span>
                   <div className="selected-content">
                     <strong>{selectedPath.steps.map((step) => step.primary.code).join(' → ')}</strong>
-                    <span>
-                      {selectedPath.steps
-                        .map((step) => `${diagnosisLabel(step.primary.code)}（${step.interval.label}）`)
-                        .join('；')}
-                    </span>
-                    <em>{selectedPath.count} 条 · {(selectedPath.share * 100).toFixed(1)}%</em>
+                    <span>{selectedPath.steps.map((step) => diagnosisLabel(step.primary.code)).join('；')}</span>
+                    <em>{selectedPath.count}/{sampleCount} 条 · 一条抽样示例的时间桶：{selectedPath.steps.map((step) => step.interval.label).join(' / ')}</em>
                   </div>
                 </section>
               )}
 
               <ReadingGuide />
-
               <div className="result-disclaimer">
                 <ShieldCheck size={15} />
                 <span>以上为研究演示输出；候选路径与百分比不是个体预测，不构成诊断或治疗建议。</span>
               </div>
-
               <TechnicalPanel
                 config={config}
                 validation={validation}

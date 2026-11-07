@@ -6,5 +6,6 @@
   "chunks": [
     "part-000.bin",
     "part-001.bin"
-  ]
+  ],
+  "sha256": "fbd31996514cc99fadc4590e7f6189f8b5d529ef2a2a9bdbebd4e39e2ad599ef"
 }

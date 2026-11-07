@@ -14,7 +14,7 @@ HospTrajFormer Web 是博士课题“基于 Transformer 的患者疾病轨迹生
 
 - 让用户输入或选择一段历史住院轨迹；
 - 在浏览器内运行 HospTrajFormer V7 ONNX 模型；
-- 生成未来 1～3 次住院的时间间隔、主要诊断和次要诊断候选；
+- 生成未来三个住院位置的时间间隔、主要诊断和次要诊断候选；
 - 用轨迹图、路径频次表和逐步分布展示不确定性；
 - 全程不上传、不保存用户输入。
 
@@ -114,7 +114,7 @@ HospTrajFormer V7 关键参数：
 | 项目 | 值 |
 |---|---|
 | 诊断词表 | 5,406 个 token |
-| 诊断编码映射 | 5,404 个 ICD-3 编码 |
+| 诊断编码映射 | 5,404 个诊断编码（对应 1,414 个不同 ICD-3 前缀） |
 | 事件嵌入维度 | 256 |
 | 最大历史长度 | 10 次住院 |
 | 最大未来步数 | 3 |
@@ -154,7 +154,7 @@ HospTrajFormer V7 关键参数：
 | `src/TechnicalPanel.tsx` | 模型版本、体积、时延、验证信息 |
 | `scripts/strip-model.mjs` | `build:pages` 时删除完整 ONNX |
 | `public/_headers` | 缓存与基础安全响应头 |
-| `public/_redirects` | SPA 回退 |
+| `public/404.html` | 真实 404 页面（不再用 SPA 回退掩盖缺失资源） |
 
 ---
 
@@ -240,8 +240,7 @@ VITE_MODEL_URL=https://.../hosptrajformer_v7.onnx
 
 - 没有自动化单元测试 / E2E 测试；
 - 没有逐例网页预处理—离线推理一致性比对；
-- 没有 Web Worker，模型加载和推理可能在主线程阻塞 UI；
-- 没有运行时分片 SHA-256 校验；
+- 没有 Web Worker，模型加载/推理仍在主线程；
 - 没有无障碍、移动端和弱网专项验收；
 - 没有 CI 工作流。
 
@@ -268,31 +267,27 @@ Cloudflare Pages 使用 pnpm 9.10，当前构建可以通过。建议：
 
 当前 `loadModel()` 和 `InferenceSession.create()` 都在主线程；31 MB 模型拼接和 wasm 初始化可能造成短暂卡顿。建议迁移到 Web Worker，或至少增加明确的加载进度。
 
-### 10.3 分片缺少完整性校验
+### 10.3 分片完整性校验
 
-当前只校验总字节数，不校验 SHA-256。建议在 `manifest.json` 中增加：
+已加入：`manifest.json` 提供 `bytes` 与 `sha256`，加载器校验总长度和拼接后的 SHA-256；校验失败会清除缓存的会话并提示重新部署。
 
-```json
-{
-  "bytes": 31330098,
-  "sha256": "FBD31996514CC99FADC4590E7F6189F8B5D529EF2A2A9BDBEBD4E39E2AD599EF"
-}
-```
+仍建议补充：分片级哈希、版本切换后的缓存失效策略，以及自动化校验脚本。
 
-并在浏览器拼接后校验，失败时给出明确提示。
+### 10.4 404 与错误恢复
 
-### 10.4 SPA 回退可能掩盖 404
+已移除 `_redirects` 的通配 SPA 回退，新增 `public/404.html`；加载器同时检查 HTTP 状态、`Content-Type`、分片长度和 SHA-256。
 
-`public/_redirects` 的 `/* /index.html 200` 会让缺失的模型分片返回 HTML 而不是 404，导致 ONNX 报“protobuf parsing failed”。建议：
+仍建议补充：加载超时/重试 UI、分片级重试，以及模型版本切换时的缓存策略。
 
-- 为 `/model/*` 增加显式 404 规则；或
-- 在加载器中校验 `Content-Type` 与字节数，避免把 HTML 当模型。
+### 10.5 输入口径
 
-### 10.5 构建体积警告
+首条历史记录已按“首次住院、前次间隔 0 天”做标准化（不再直接把连续时间特征置 0）；但网页仍用时间桶中位天数回填递归间隔，离线脚本默认从桶内经验间隔池抽取，因此连续天数仍是网页简化版。
+
+### 10.6 构建体积警告
 
 Vite 提示 JS chunk 超过 500 kB。可接受，但可通过动态 import、拆分 UI 依赖或配置 `chunkSizeWarningLimit` 降低噪音。
 
-### 10.6 其他
+### 10.7 其他
 
 - `MODEL_SOURCE` 目前未被使用，可删除或展示在技术面板；
 - `wrangler.toml` 已移除，当前只走 Pages；
